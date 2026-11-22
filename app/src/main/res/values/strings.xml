@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Kart</string>
+    <string name="tagline">Buy &amp; sell effortlessly across campus</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_shop">Shop</string>
+    <string name="nav_add">Add</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_profile">Profile</string>
+    <string name="cd_kart_logo">Kart logo</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_search">Search listings</string>
+    <string name="cd_notifications">Notifications</string>
+    <string name="cd_wishlist">Toggle wishlist</string>
+    <string name="cd_share">Share listing</string>
+    <string name="cd_filter">Filter and sort</string>
+</resources>

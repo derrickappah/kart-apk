@@ -1,0 +1,6 @@
+{
+  "name": "Kart",
+  "description": "Campus marketplace to buy and sell textbooks, clothing, electronics, dorm essentials, and services across campus with escrow protection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
