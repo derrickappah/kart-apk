@@ -1,0 +1,51 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Fridge body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,22 C28,18.7 30.7,16 34,16 L62,16 C65.3,16 68,18.7 68,22 L68,74 C68,77.3 65.3,80 62,80 L34,80 C30.7,80 28,77.3 28,74 Z" />
+
+    <!-- Freezer top tint -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M28,22 C28,18.7 30.7,16 34,16 L62,16 C65.3,16 68,18.7 68,22 L68,39 L28,39 Z" />
+
+    <!-- Water dispenser panel -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M48,46 C48,44.9 48.9,44 50,44 L60,44 C61.1,44 62,44.9 62,46 L62,60 C62,61.1 61.1,62 60,62 L50,62 C48.9,62 48,61.1 48,60 Z" />
+
+    <!-- Outlines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M28,22 C28,18.7 30.7,16 34,16 L62,16 C65.3,16 68,18.7 68,22 L68,74 C68,77.3 65.3,80 62,80 L34,80 C30.7,80 28,77.3 28,74 Z" />
+
+    <!-- Divider & handles -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M28,39 L68,39 M35,25 L35,33 M35,46 L35,58" />
+
+    <!-- Feet -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:pathData="M35,80 L35,83 M61,80 L61,83" />
+</vector>

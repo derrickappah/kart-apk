@@ -306,8 +306,42 @@ object KartFormatters {
         return rotatedNonBanner + shiftedBanner
     }
 
+    data class VoiceMessagePayload(
+        val url: String,
+        val durationSeconds: Int
+    )
+
+    fun extractMessageVoice(content: String): VoiceMessagePayload? {
+        val trimmed = content.trim()
+        if (trimmed.startsWith("[VOICE:") && trimmed.endsWith("]")) {
+            val inner = trimmed.removePrefix("[VOICE:").removeSuffix("]").trim()
+            val parts = inner.split("|", limit = 2)
+            val url = parts.getOrNull(0)?.trim().orEmpty()
+            val dur = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0
+            if (url.isNotBlank()) return VoiceMessagePayload(url, dur)
+        }
+        if (trimmed.startsWith("https://") &&
+            (trimmed.endsWith(".m4a", true) ||
+                trimmed.endsWith(".aac", true) ||
+                trimmed.endsWith(".mp3", true) ||
+                trimmed.endsWith(".ogg", true) ||
+                trimmed.endsWith(".wav", true))
+        ) {
+            return VoiceMessagePayload(trimmed, 0)
+        }
+        return null
+    }
+
+    fun formatDuration(seconds: Int): String {
+        val safe = seconds.coerceAtLeast(0)
+        val mins = safe / 60
+        val secs = safe % 60
+        return "%d:%02d".format(mins, secs)
+    }
+
     fun extractMessageImageUrl(content: String): String? {
         val trimmed = content.trim()
+        if (extractMessageVoice(trimmed) != null) return null
         if (trimmed.startsWith("[IMAGE:") && trimmed.endsWith("]")) {
             return trimmed.removePrefix("[IMAGE:").removeSuffix("]").trim()
         }
@@ -326,6 +360,7 @@ object KartFormatters {
     fun messageSnippet(content: String?): String {
         val raw = content?.trim().orEmpty()
         if (raw.isEmpty()) return "No messages yet"
+        if (extractMessageVoice(raw) != null) return "🎤 Voice message"
         return if (extractMessageImageUrl(raw) != null) "📷 Photo" else raw
     }
 }

@@ -1,7 +1,27 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -125,58 +145,163 @@ fun MarketplaceScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 item(key = "search_and_controls") {
+                    val tokens = com.example.ui.theme.KartThemeTokens.colors
+                    val easeOutStrong = remember { CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
+                    var isSearchFocused by remember { mutableStateOf(false) }
+                    val filterInteraction = remember { MutableInteractionSource() }
+                    val filterPressed by filterInteraction.collectIsPressedAsState()
+                    val filterScale by animateFloatAsState(
+                        targetValue = if (filterPressed) 0.93f else 1f,
+                        animationSpec = tween(durationMillis = 120, easing = easeOutStrong),
+                        label = "shopFilterScale"
+                    )
+                    val borderColor by animateColorAsState(
+                        targetValue = if (isSearchFocused) KartPrimary else tokens.cardBorder,
+                        animationSpec = tween(durationMillis = 180, easing = easeOutStrong),
+                        label = "shopSearchBorder"
+                    )
+                    val searchIconColor by animateColorAsState(
+                        targetValue = if (isSearchFocused) KartPrimary else tokens.textMuted,
+                        animationSpec = tween(durationMillis = 180, easing = easeOutStrong),
+                        label = "shopSearchIcon"
+                    )
+                    val filterCount = state.filter.activeFilterCount
+                    val hasFilters = filterCount > 0
+                    val filterBg by animateColorAsState(
+                        targetValue = if (hasFilters) KartPrimary else MaterialTheme.colorScheme.surfaceVariant,
+                        animationSpec = tween(durationMillis = 180, easing = easeOutStrong),
+                        label = "shopFilterBg"
+                    )
+                    val filterContentColor by animateColorAsState(
+                        targetValue = if (hasFilters) Color.White else tokens.textPrimary,
+                        animationSpec = tween(durationMillis = 180, easing = easeOutStrong),
+                        label = "shopFilterContent"
+                    )
+                    val pillShape = RoundedCornerShape(26.dp)
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 20.dp)
+                            .height(52.dp)
+                            .shadow(
+                                elevation = if (isSearchFocused) 6.dp else 2.dp,
+                                shape = pillShape,
+                                ambientColor = Color.Black.copy(alpha = 0.08f),
+                                spotColor = Color.Black.copy(alpha = 0.12f)
+                            )
+                            .clip(pillShape)
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(
+                                width = if (isSearchFocused) 1.5.dp else 1.dp,
+                                color = borderColor,
+                                shape = pillShape
+                            )
+                            .padding(start = 16.dp, end = 6.dp)
                     ) {
-                        KartSearchBar(
-                            query = state.filter.query,
-                            onQueryChange = { viewModel.updateSearch(it) },
-                            onSearch = { viewModel.loadProducts(reset = true) },
-                            modifier = Modifier.weight(1f)
+                        Icon(
+                            imageVector = KartLucideIcons.Search,
+                            contentDescription = "Search",
+                            tint = searchIconColor,
+                            modifier = Modifier.size(19.dp)
                         )
 
-                        Box {
-                            Surface(
-                                onClick = { showFilterSheet = true },
-                                shape = RoundedCornerShape(14.dp),
-                                color = KartPrimary,
-                                contentColor = Color.White,
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("marketplace_filter_button")
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = KartLucideIcons.SlidersHorizontal,
-                                        contentDescription = "Filter and sort",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
+                        Spacer(Modifier.width(10.dp))
+
+                        Box(
+                            contentAlignment = Alignment.CenterStart,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (state.filter.query.isEmpty()) {
+                                Text(
+                                    text = "Search campus listings...",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = tokens.textMuted,
+                                    maxLines = 1
+                                )
                             }
-                            val count = state.filter.activeFilterCount
-                            if (count > 0) {
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .offset(x = 5.dp, y = (-5).dp)
-                                        .size(20.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.White)
-                                        .border(1.5.dp, KartPrimary, CircleShape)
-                                ) {
-                                    Text(
-                                        text = "$count",
-                                        color = KartPrimary,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Black
-                                    )
+                            BasicTextField(
+                                value = state.filter.query,
+                                onValueChange = { viewModel.updateSearch(it) },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                    color = tokens.textPrimary
+                                ),
+                                cursorBrush = SolidColor(KartPrimary),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(
+                                    onSearch = { viewModel.loadProducts(reset = true) }
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onFocusChanged { isSearchFocused = it.isFocused }
+                                    .testTag("marketplace_search_input")
+                            )
+                        }
+
+                        AnimatedVisibility(
+                            visible = state.filter.query.isNotEmpty(),
+                            enter = fadeIn(tween(140, easing = easeOutStrong)) +
+                                scaleIn(initialScale = 0.82f, animationSpec = tween(140, easing = easeOutStrong)),
+                            exit = fadeOut(tween(110, easing = easeOutStrong)) +
+                                scaleOut(targetScale = 0.82f, animationSpec = tween(110, easing = easeOutStrong))
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        viewModel.updateSearch("")
+                                        viewModel.loadProducts(reset = true)
+                                    }
+                            ) {
+                                Icon(
+                                    imageVector = KartLucideIcons.X,
+                                    contentDescription = "Clear search",
+                                    tint = tokens.textMuted,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.width(6.dp))
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier
+                                .height(40.dp)
+                                .graphicsLayer {
+                                    scaleX = filterScale
+                                    scaleY = filterScale
                                 }
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(filterBg)
+                                .clickable(
+                                    interactionSource = filterInteraction,
+                                    indication = null,
+                                    onClick = { showFilterSheet = true }
+                                )
+                                .padding(horizontal = if (hasFilters) 12.dp else 11.dp)
+                                .testTag("marketplace_filter_button")
+                        ) {
+                            Icon(
+                                imageVector = KartLucideIcons.SlidersHorizontal,
+                                contentDescription = "Filter and sort",
+                                tint = filterContentColor,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            if (hasFilters) {
+                                Text(
+                                    text = "$filterCount",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontFeatureSettings = "tnum"
+                                    ),
+                                    fontWeight = FontWeight.Bold,
+                                    color = filterContentColor
+                                )
                             }
                         }
                     }

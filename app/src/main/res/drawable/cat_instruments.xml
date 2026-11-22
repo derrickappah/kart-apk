@@ -1,0 +1,67 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Guitar body (angled) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M23,55 C16,62 18,74 26,79 C34,84 44,81 49,74 C53,68 51,62 54,58 C57,54 62,53 65,49 C69,44 68,36 62,32 C56,28 49,30 45,35 C42,39 41,44 37,47 C33,50 27,51 23,55 Z" />
+
+    <!-- Guitar body shading -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M34,63 A7,7 0 1,0 44,53 A7,7 0 1,0 34,63 Z" />
+
+    <!-- Soundhole -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M36,61 A5,5 0 1,0 43,54 A5,5 0 1,0 36,61 Z" />
+
+    <!-- Guitar neck -->
+    <path
+        android:fillColor="#E2E8F0"
+        android:pathData="M55,37 L74,18 L79,23 L60,42 Z" />
+
+    <!-- Headstock -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M72,16 L80,12 L84,16 L80,24 Z" />
+
+    <!-- Outlines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M23,55 C16,62 18,74 26,79 C34,84 44,81 49,74 C53,68 51,62 54,58 C57,54 62,53 65,49 C69,44 68,36 62,32 C56,28 49,30 45,35 C42,39 41,44 37,47 C33,50 27,51 23,55 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M55,37 L74,18 L79,23 L60,42" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M72,16 L80,12 L84,16 L80,24 Z" />
+
+    <!-- Bridge -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M27,65 L35,73" />
+</vector>

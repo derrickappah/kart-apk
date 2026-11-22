@@ -1,0 +1,74 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Laptop screen outer frame -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,26 C20,23.2 22.2,21 25,21 L65,21 C67.8,21 70,23.2 70,26 L70,58 L20,58 Z" />
+
+    <!-- Laptop screen display -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M25,26 L65,26 L65,53 L25,53 Z" />
+
+    <!-- Screen diagonal gloss -->
+    <path
+        android:fillColor="#E0F2FE"
+        android:pathData="M25,26 L47,26 L33,53 L25,53 Z" />
+
+    <!-- Laptop base -->
+    <path
+        android:fillColor="#E2E8F0"
+        android:pathData="M14,58 L76,58 L76,62 C76,64.2 74.2,66 72,66 L18,66 C15.8,66 14,64.2 14,62 Z" />
+
+    <!-- Laptop outline -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M20,26 C20,23.2 22.2,21 25,21 L65,21 C67.8,21 70,23.2 70,26 L70,58 L20,58 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M14,58 L76,58 L76,62 C76,64.2 74.2,66 72,66 L18,66 C15.8,66 14,64.2 14,62 Z" />
+
+    <!-- Overlapping smartphone body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M56,42 C56,39.2 58.2,37 61,37 L75,37 C77.8,37 80,39.2 80,42 L80,75 C80,77.8 77.8,80 75,80 L61,80 C58.2,80 56,77.8 56,75 Z" />
+
+    <!-- Smartphone screen -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M60,44 L76,44 L76,71 L60,71 Z" />
+
+    <!-- Smartphone outline -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M56,42 C56,39.2 58.2,37 61,37 L75,37 C77.8,37 80,39.2 80,42 L80,75 C80,77.8 77.8,80 75,80 L61,80 C58.2,80 56,77.8 56,75 Z" />
+
+    <!-- Smartphone speaker & home pill -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round"
+        android:pathData="M66,40.5 L70,40.5 M65,75.5 L71,75.5" />
+</vector>

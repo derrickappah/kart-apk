@@ -84,15 +84,15 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
     ) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
+            val resolvedPhone = whatsapp.trim().ifBlank { phone.trim() }
             val fields = buildMap<String, Any?> {
                 put("display_name", displayName.trim())
-                put("username", username.trim())
+                if (username.isNotBlank()) put("username", username.trim())
                 put("bio", bio.trim())
                 put("campus", campus.trim())
-                put("phone", phone.trim())
-                put("instagram_url", instagram.trim())
-                put("snapchat_url", snapchat.trim())
-                put("whatsapp_number", whatsapp.trim())
+                put("phone", resolvedPhone.ifBlank { null })
+                put("instagram", instagram.trim().ifBlank { null })
+                put("snapchat", snapchat.trim().ifBlank { null })
                 if (!avatarUrl.isNullOrBlank()) put("avatar_url", avatarUrl)
             }
             when (val res = repository.updateProfile(userId, fields)) {
@@ -108,7 +108,7 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
     fun uploadAvatar(resolver: ContentResolver, uri: Uri, onUrl: (String) -> Unit) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
-            when (val res = repository.uploadImageUri(resolver, uri, bucket = "avatars")) {
+            when (val res = repository.uploadImageUri(resolver, uri, bucket = "profiles")) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(actionLoading = false) }
                     onUrl(res.data)

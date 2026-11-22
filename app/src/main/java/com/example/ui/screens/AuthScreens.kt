@@ -1,8 +1,24 @@
 package com.example.ui.screens
 
+import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
+import android.util.Log
+import java.security.MessageDigest
+import java.util.UUID
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -40,6 +56,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -152,7 +169,9 @@ fun LoginScreen(
             }
 
             GoogleContinueButton(
+                sessionViewModel = sessionViewModel,
                 enabled = !state.authLoading,
+                onSuccess = onLoginSuccess,
                 onError = { msg -> localError = msg },
                 testTag = "login_google_button"
             )
@@ -292,7 +311,9 @@ fun SignUpScreen(
             if (!state.authInfo.isNullOrBlank()) AuthBanner(state.authInfo!!, isError = false)
 
             GoogleContinueButton(
+                sessionViewModel = sessionViewModel,
                 enabled = !state.authLoading,
+                onSuccess = { onSignedUp(true) },
                 onError = { msg -> localError = msg },
                 testTag = "signup_google_button"
             )
@@ -459,19 +480,51 @@ fun StatusGuardScreen(
     }
 }
 
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun sha256Hex(input: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
+    return digest.joinToString("") { "%02x".format(it) }
+}
+
+private fun launchBrowserGoogleOAuth(context: Context, onError: (String) -> Unit): Boolean {
+    return try {
+        val baseUrl = BuildConfig.KART_API_BASE_URL.trimEnd('/')
+        val authUri = Uri.parse("$baseUrl/api/auth/google?return_to_app=true")
+        val intent = Intent(Intent.ACTION_VIEW, authUri).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+        true
+    } catch (_: ActivityNotFoundException) {
+        onError("No browser found to complete Google sign-in.")
+        false
+    } catch (_: Exception) {
+        onError("Could not start Google sign-in. Please try again.")
+        false
+    }
+}
+
 @Composable
 private fun GoogleContinueButton(
+    sessionViewModel: SessionViewModel,
     enabled: Boolean,
+    onSuccess: () -> Unit,
     onError: (String) -> Unit,
     testTag: String,
     label: String = "Continue with Google"
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
     val tokens = KartThemeTokens.colors
     var googleLoading by remember { mutableStateOf(false) }
 
-    // Reset spinner when returning from the browser tab (mirrors Capacitor browserFinished)
+    // Reset spinner when returning from the browser tab fallback
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -487,20 +540,73 @@ private fun GoogleContinueButton(
     Surface(
         onClick = {
             if (isBusy) return@Surface
-            googleLoading = true
-            try {
-                val baseUrl = BuildConfig.KART_API_BASE_URL.trimEnd('/')
-                val authUri = Uri.parse("$baseUrl/api/auth/google?return_to_app=true")
-                val intent = Intent(Intent.ACTION_VIEW, authUri).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val webClientId = BuildConfig.GOOGLE_WEB_CLIENT_ID.trim()
+            val hasWebClientId = webClientId.isNotBlank() && !webClientId.startsWith("YOUR_")
+
+            if (!hasWebClientId) {
+                googleLoading = true
+                if (!launchBrowserGoogleOAuth(context, onError)) {
+                    googleLoading = false
                 }
-                context.startActivity(intent)
-            } catch (_: ActivityNotFoundException) {
-                googleLoading = false
-                onError("No browser found to complete Google sign-in.")
-            } catch (_: Exception) {
-                googleLoading = false
-                onError("Could not start Google sign-in. Please try again.")
+                return@Surface
+            }
+
+            googleLoading = true
+            scope.launch {
+                try {
+                    val activityContext = context.findActivity() ?: context
+                    val credentialManager = CredentialManager.create(activityContext)
+                    val rawNonce = UUID.randomUUID().toString()
+                    val hashedNonce = sha256Hex(rawNonce)
+
+                    val googleIdOption = GetSignInWithGoogleOption.Builder(webClientId)
+                        .setNonce(hashedNonce)
+                        .build()
+
+                    val request = GetCredentialRequest.Builder()
+                        .addCredentialOption(googleIdOption)
+                        .build()
+
+                    val result = credentialManager.getCredential(
+                        request = request,
+                        context = activityContext
+                    )
+                    val credential = result.credential
+                    if (credential is CustomCredential &&
+                        credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+                    ) {
+                        val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+                        googleLoading = false
+                        sessionViewModel.signInWithGoogleIdToken(
+                            idToken = googleIdTokenCredential.idToken,
+                            rawNonce = rawNonce,
+                            onSuccess = onSuccess
+                        )
+                    } else {
+                        googleLoading = false
+                        onError("Unexpected Google credential type. Please try again.")
+                    }
+                } catch (_: GetCredentialCancellationException) {
+                    googleLoading = false
+                } catch (e: NoCredentialException) {
+                    Log.w("KartGoogleAuth", "NoCredentialException: ${e.errorMessage}", e)
+                    // No Google account signed in on the device (or Android OAuth client SHA-1 not registered) — fall back to browser OAuth.
+                    if (!launchBrowserGoogleOAuth(context, onError)) {
+                        googleLoading = false
+                    }
+                } catch (e: GoogleIdTokenParsingException) {
+                    Log.e("KartGoogleAuth", "GoogleIdTokenParsingException", e)
+                    googleLoading = false
+                    onError("Could not read Google account token. Please try again.")
+                } catch (e: GetCredentialException) {
+                    Log.e("KartGoogleAuth", "GetCredentialException: ${e.type} - ${e.errorMessage}", e)
+                    googleLoading = false
+                    onError(e.errorMessage?.toString() ?: "Google sign-in failed. Please try again.")
+                } catch (e: Exception) {
+                    Log.e("KartGoogleAuth", "Unexpected error", e)
+                    googleLoading = false
+                    onError(e.localizedMessage ?: "Could not start Google sign-in. Please try again.")
+                }
             }
         },
         enabled = !isBusy,

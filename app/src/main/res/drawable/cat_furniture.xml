@@ -1,0 +1,72 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Chair legs -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:pathData="M31,67 L27,80 M65,67 L69,80" />
+
+    <!-- Backrest fill -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,30 C28,23.4 33.4,18 40,18 L56,18 C62.6,18 68,23.4 68,30 L68,52 L28,52 Z" />
+
+    <!-- Backrest cushion accent -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M34,25 C34,23.3 35.3,22 37,22 L59,22 C60.7,22 62,23.3 62,25 L62,48 L34,48 Z" />
+
+    <!-- Seat cushion fill -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M24,49 C24,46.8 25.8,45 28,45 L68,45 C70.2,45 72,46.8 72,49 L72,62 C72,64.8 69.8,67 67,67 L29,67 C26.2,67 24,64.8 24,62 Z" />
+
+    <!-- Armrests fill -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,45 C20,42.2 22.2,40 25,40 C27.8,40 30,42.2 30,45 L30,63 C30,65.2 28.2,67 26,67 L24,67 C21.8,67 20,65.2 20,63 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M66,45 C66,42.2 68.2,40 71,40 C73.8,40 76,42.2 76,45 L76,63 C76,65.2 74.2,67 72,67 L70,67 C67.8,67 66,65.2 66,63 Z" />
+
+    <!-- Outlines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M28,40 L28,30 C28,23.4 33.4,18 40,18 L56,18 C62.6,18 68,23.4 68,30 L68,40" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M30,48 L66,48 M30,67 L66,67" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M20,45 C20,42.2 22.2,40 25,40 C27.8,40 30,42.2 30,45 L30,63 C30,65.2 28.2,67 26,67 L24,67 C21.8,67 20,65.2 20,63 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M66,45 C66,42.2 68.2,40 71,40 C73.8,40 76,42.2 76,45 L76,63 C76,65.2 74.2,67 72,67 L70,67 C67.8,67 66,65.2 66,63 Z" />
+</vector>

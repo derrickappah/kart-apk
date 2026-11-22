@@ -1,0 +1,58 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Backpack top loop -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M41,23 C41,18.5 44.1,15 48,15 C51.9,15 55,18.5 55,23" />
+
+    <!-- Backpack main body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M26,42 C26,30.4 35.4,22 48,22 C60.6,22 70,30.4 70,42 L70,73 C70,76.9 66.9,80 63,80 L33,80 C29.1,80 26,76.9 26,73 Z" />
+
+    <!-- Top flap accent -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M26,42 C26,30.4 35.4,22 48,22 C60.6,22 70,30.4 70,42 L70,46 L26,46 Z" />
+
+    <!-- Front pocket -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M34,54 C34,51.8 35.8,50 38,50 L58,50 C60.2,50 62,51.8 62,54 L62,72 C62,74.2 60.2,76 58,76 L38,76 C35.8,76 34,74.2 34,72 Z" />
+
+    <!-- Outlines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M26,42 C26,30.4 35.4,22 48,22 C60.6,22 70,30.4 70,42 L70,73 C70,76.9 66.9,80 63,80 L33,80 C29.1,80 26,76.9 26,73 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M34,54 C34,51.8 35.8,50 38,50 L58,50 C60.2,50 62,51.8 62,54 L62,72 C62,74.2 60.2,76 58,76 L38,76 C35.8,76 34,74.2 34,72 Z" />
+
+    <!-- Zipper & detail lines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round"
+        android:pathData="M42,57 L54,57 M48,37 L48,43" />
+</vector>

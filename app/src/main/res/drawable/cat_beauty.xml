@@ -1,0 +1,64 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Perfume cap -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M34,19 C34,17.3 35.3,16 37,16 L51,16 C52.7,16 54,17.3 54,19 L54,28 L34,28 Z" />
+
+    <!-- Perfume neck -->
+    <path
+        android:fillColor="#E2E8F0"
+        android:pathData="M38,28 L50,28 L50,34 L38,34 Z" />
+
+    <!-- Perfume bottle body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,41 C24,37.1 27.1,34 31,34 L57,34 C60.9,34 64,37.1 64,41 L64,73 C64,76.9 60.9,80 57,80 L31,80 C27.1,80 24,76.9 24,73 Z" />
+
+    <!-- Perfume liquid fill -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M29,49 L59,49 L59,72 C59,73.7 57.7,75 56,75 L32,75 C30.3,75 29,73.7 29,72 Z" />
+
+    <!-- Minimalist label -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M35,51 L53,51 L53,65 L35,65 Z" />
+
+    <!-- Outlines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M34,28 L34,19 C34,17.3 35.3,16 37,16 L51,16 C52.7,16 54,17.3 54,19 L54,28 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M38,28 L38,34 M50,28 L50,34" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M24,41 C24,37.1 27.1,34 31,34 L57,34 C60.9,34 64,37.1 64,41 L64,73 C64,76.9 60.9,80 57,80 L31,80 C27.1,80 24,76.9 24,73 Z" />
+
+    <!-- Sparkle accent -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M73,24 L74.8,29.2 L80,31 L74.8,32.8 L73,38 L71.2,32.8 L66,31 L71.2,29.2 Z" />
+</vector>

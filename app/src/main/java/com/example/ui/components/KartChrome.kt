@@ -203,21 +203,41 @@ fun KartTopBar(
                                 }
                             }
                             if (unreadNotifications > 0) {
+                                val badgeShape = RoundedCornerShape(999.dp)
+                                val badgeLabel = if (unreadNotifications > 99) "99+" else "$unreadNotifications"
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
-                                        .offset(x = (-6).dp, y = 8.dp)
-                                        .size(16.dp)
-                                        .clip(CircleShape)
+                                        .offset(x = (-4).dp, y = 6.dp)
+                                        .shadow(
+                                            elevation = 2.dp,
+                                            shape = badgeShape,
+                                            ambientColor = Color.Black.copy(alpha = 0.25f),
+                                            spotColor = Color.Black.copy(alpha = 0.30f)
+                                        )
+                                        .clip(badgeShape)
                                         .background(KartDanger)
-                                        .border(1.5.dp, badgeRingColor, CircleShape)
+                                        .border(1.5.dp, badgeRingColor, badgeShape)
+                                        .height(18.dp)
+                                        .padding(horizontal = if (badgeLabel.length > 1) 5.dp else 0.dp)
+                                        .then(
+                                            if (badgeLabel.length == 1) Modifier.width(18.dp) else Modifier
+                                        )
                                 ) {
                                     Text(
-                                        text = if (unreadNotifications > 9) "9+" else "$unreadNotifications",
+                                        text = badgeLabel,
                                         color = Color.White,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = androidx.compose.ui.text.TextStyle(
+                                            fontSize = 10.sp,
+                                            lineHeight = 10.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                                                includeFontPadding = false
+                                            )
+                                        ),
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -337,21 +357,41 @@ fun KartBottomNav(
                                 modifier = Modifier.size(24.dp)
                             )
                             if (tab.route == "messages" && unreadMessages > 0) {
+                                val badgeShape = RoundedCornerShape(999.dp)
+                                val badgeLabel = if (unreadMessages > 99) "99+" else unreadMessages.toString()
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
-                                        .offset(x = 10.dp, y = (-5).dp)
-                                        .clip(CircleShape)
+                                        .offset(x = 9.dp, y = (-5).dp)
+                                        .shadow(
+                                            elevation = 2.dp,
+                                            shape = badgeShape,
+                                            ambientColor = Color.Black.copy(alpha = 0.25f),
+                                            spotColor = Color.Black.copy(alpha = 0.30f)
+                                        )
+                                        .clip(badgeShape)
                                         .background(KartDanger)
-                                        .border(1.5.dp, MaterialTheme.colorScheme.background, CircleShape)
-                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                        .border(1.5.dp, MaterialTheme.colorScheme.background, badgeShape)
+                                        .height(17.dp)
+                                        .padding(horizontal = if (badgeLabel.length > 1) 4.5.dp else 0.dp)
+                                        .then(
+                                            if (badgeLabel.length == 1) Modifier.width(17.dp) else Modifier
+                                        )
                                 ) {
                                     Text(
-                                        text = if (unreadMessages > 99) "99+" else unreadMessages.toString(),
+                                        text = badgeLabel,
                                         color = Color.White,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = androidx.compose.ui.text.TextStyle(
+                                            fontSize = 9.5.sp,
+                                            lineHeight = 9.5.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                                                includeFontPadding = false
+                                            )
+                                        ),
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }

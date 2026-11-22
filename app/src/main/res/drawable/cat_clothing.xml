@@ -1,0 +1,57 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Hanger hook -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M48,25 C48,21.5 52,20 52,17 C52,14.5 50,13 48,13 C46,13 44.5,14.3 44.5,16" />
+
+    <!-- Shirt body fill -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,26 L20,35 L26,48 L33,44 L33,76 C33,78.2 34.8,80 37,80 L59,80 C61.2,80 63,78.2 63,76 L63,44 L70,48 L76,35 L60,26 C57,30.5 53,32.5 48,32.5 C43,32.5 39,30.5 36,26 Z" />
+
+    <!-- Shirt inner collar shadow -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M36,26 C39,30.5 43,32.5 48,32.5 C53,32.5 57,30.5 60,26 L56,24 C53.5,27 51,28.5 48,28.5 C45,28.5 42.5,27 40,24 Z" />
+
+    <!-- Subtle right side shading -->
+    <path
+        android:fillColor="#E2E8F0"
+        android:pathData="M55,31 L55,80 L59,80 C61.2,80 63,78.2 63,76 L63,44 L70,48 L76,35 L60,26 C58.5,28.3 56.8,30 55,31 Z" />
+
+    <!-- Brand accent chest pocket -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M51,42 L59,42 C59.8,42 60.5,42.7 60.5,43.5 L60.5,51 C60.5,53 58,54.5 55,54.5 C52,54.5 49.5,53 49.5,51 L49.5,43.5 C49.5,42.7 50.2,42 51,42 Z" />
+
+    <!-- Shirt outline -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M36,26 L20,35 L26,48 L33,44 L33,76 C33,78.2 34.8,80 37,80 L59,80 C61.2,80 63,78.2 63,76 L63,44 L70,48 L76,35 L60,26 C57,30.5 53,32.5 48,32.5 C43,32.5 39,30.5 36,26 Z" />
+
+    <!-- Sleeve cuff accent lines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round"
+        android:pathData="M33,73 L63,73" />
+</vector>

@@ -209,7 +209,17 @@ fun WalletScreen(
                     }
                 } else {
                     items(txns, key = { it.id }) { txn ->
-                        val isCredit = txn.type.equals("credit", true) || txn.type.equals("deposit", true) || txn.amount > 0
+                        val isDebitType = txn.type.equals("debit", true) ||
+                            txn.type.equals("withdrawal", true) ||
+                            txn.type.equals("purchase", true) ||
+                            txn.type.equals("payment", true)
+                        val isCredit = !isDebitType && (
+                            txn.type.equals("credit", true) ||
+                                txn.type.equals("deposit", true) ||
+                                txn.type.equals("refund", true) ||
+                                txn.type.equals("payout", true) ||
+                                txn.amount > 0
+                            )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -358,10 +368,11 @@ fun WithdrawFundsScreen(
                 label = "MoMo Number or Bank Account",
                 placeholder = "054 000 0000 - Kwame Mensah"
             )
+            val withdrawAmount = amountText.toDoubleOrNull() ?: 0.0
             KartPrimaryButton(
                 text = "Request Withdrawal",
                 loading = state.actionLoading,
-                enabled = (amountText.toDoubleOrNull() ?: 0.0) > 0 && accountDetails.isNotBlank(),
+                enabled = withdrawAmount > 0.0 && withdrawAmount <= state.wallet.balance && accountDetails.isNotBlank(),
                 onClick = {
                     val amt = amountText.toDoubleOrNull() ?: return@KartPrimaryButton
                     viewModel.withdraw(amt, method, accountDetails.trim(), userId) {

@@ -103,6 +103,47 @@ fun KartAppRoot(
     val sessionState by sessionViewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val pushEnabled by sessionViewModel.pushEnabled.collectAsStateWithLifecycle()
+
+    val networkMonitor = remember(context) { com.example.data.remote.NetworkMonitor(context) }
+    androidx.compose.runtime.DisposableEffect(networkMonitor) {
+        networkMonitor.start()
+        onDispose { networkMonitor.stop() }
+    }
+    val isOnline by networkMonitor.isOnline.collectAsStateWithLifecycle()
+
+    val notifPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { /* handled silently */ }
+
+    LaunchedEffect(sessionState.isLoggedIn, pushEnabled) {
+        com.example.notifications.KartNotificationHelper.ensureChannels(context)
+        if (sessionState.isLoggedIn && pushEnabled &&
+            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            !com.example.notifications.KartNotificationHelper.hasNotificationPermission(context)
+        ) {
+            notifPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        sessionViewModel.pushAlerts.collect { alert ->
+            com.example.notifications.KartNotificationHelper.showNotification(
+                context = context,
+                notificationId = alert.id,
+                channelId = if (alert.isMessage) {
+                    com.example.notifications.KartNotificationHelper.CHANNEL_MESSAGES
+                } else {
+                    com.example.notifications.KartNotificationHelper.CHANNEL_UPDATES
+                },
+                title = alert.title,
+                body = alert.body,
+                deepLink = alert.deepLink
+            )
+        }
+    }
+
     // Global snackbar feedback
     LaunchedEffect(sessionState.snackbarMessage) {
         sessionState.snackbarMessage?.let { msg ->
@@ -117,15 +158,22 @@ fun KartAppRoot(
             val raw = deepLinkUri.toString()
             val refreshToken = deepLinkUri.getQueryParameter("refresh_token")
             val authErrorParam = deepLinkUri.getQueryParameter("error")
+            val isTrustedAuthCallback =
+                (deepLinkUri.scheme == "https" && deepLinkUri.host in setOf("www.kart.cx", "kart.cx")) ||
+                    (deepLinkUri.scheme == "kart-app" && deepLinkUri.host in setOf("auth-callback", "auth-tokens"))
             when {
                 !refreshToken.isNullOrBlank() -> {
-                    sessionViewModel.handleDeepLinkRefreshToken(refreshToken) {
-                        navController.navigate("home") {
-                            popUpTo(navController.graph.findStartDestination().id) {
-                                inclusive = true
-                                saveState = false
+                    if (!isTrustedAuthCallback || sessionState.isLoggedIn) {
+                        sessionViewModel.showMessage("Sign-in link ignored because a session is already active or the link is untrusted.")
+                    } else {
+                        sessionViewModel.handleDeepLinkRefreshToken(refreshToken) {
+                            navController.navigate("home") {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    inclusive = true
+                                    saveState = false
+                                }
+                                launchSingleTop = true
                             }
-                            launchSingleTop = true
                         }
                     }
                 }
@@ -135,13 +183,25 @@ fun KartAppRoot(
                 raw.contains("checkout-success") -> {
                     val orderId = deepLinkUri.getQueryParameter("orderId")
                     val subId = deepLinkUri.getQueryParameter("subscriptionId")
+                    val promoId = deepLinkUri.getQueryParameter("promotionId")
+                    val payType = deepLinkUri.getQueryParameter("type")
                     val ref = deepLinkUri.getQueryParameter("reference") ?: deepLinkUri.getQueryParameter("trxref")
                     if (!ref.isNullOrBlank()) {
-                        repository.verifyPaystackReference(ref)
+                        when {
+                            !subId.isNullOrBlank() || payType == "subscription" ->
+                                repository.verifySubscriptionReference(ref)
+                            !promoId.isNullOrBlank() || payType == "promotion" ->
+                                repository.verifyPromotionReference(ref)
+                            payType == "wallet" ->
+                                repository.verifyWalletDeposit(ref)
+                            else ->
+                                repository.verifyPaystackReference(ref)
+                        }
                     }
                     when {
                         !orderId.isNullOrBlank() -> navController.navigate("order_detail/$orderId")
-                        !subId.isNullOrBlank() -> navController.navigate("subscriptions")
+                        !subId.isNullOrBlank() || payType == "subscription" -> navController.navigate("subscriptions")
+                        payType == "wallet" -> navController.navigate("wallet")
                         else -> navController.navigate("orders")
                     }
                 }
@@ -154,6 +214,33 @@ fun KartAppRoot(
                 deepLinkUri.path?.startsWith("/profile/") == true -> {
                     val seg = deepLinkUri.lastPathSegment
                     if (!seg.isNullOrBlank()) navController.navigate("public_profile/$seg")
+                }
+                deepLinkUri.path?.startsWith("/messages/") == true -> {
+                    val seg = deepLinkUri.lastPathSegment
+                    if (!seg.isNullOrBlank()) navController.navigate("chat/$seg")
+                }
+                deepLinkUri.path == "/messages" -> {
+                    navController.navigate("messages") { launchSingleTop = true }
+                }
+                deepLinkUri.path == "/notifications" -> {
+                    navController.navigate("notifications") { launchSingleTop = true }
+                }
+                deepLinkUri.path?.contains("/orders/") == true -> {
+                    val seg = deepLinkUri.lastPathSegment
+                    if (!seg.isNullOrBlank()) navController.navigate("order_detail/$seg")
+                }
+                deepLinkUri.path == "/orders" -> {
+                    navController.navigate("orders") { launchSingleTop = true }
+                }
+                deepLinkUri.path?.contains("/wallet") == true -> {
+                    val ref = deepLinkUri.getQueryParameter("reference") ?: deepLinkUri.getQueryParameter("trxref")
+                    if (!ref.isNullOrBlank()) {
+                        repository.verifyWalletDeposit(ref)
+                    }
+                    navController.navigate("wallet") { launchSingleTop = true }
+                }
+                deepLinkUri.path?.contains("/verify") == true -> {
+                    navController.navigate("verify_identity") { launchSingleTop = true }
                 }
             }
             onDeepLinkConsumed()
@@ -189,15 +276,18 @@ fun KartAppRoot(
 
     fun navigateTopTab(route: String) {
         if (route == "seller_create") {
-            if (!sessionState.isLoggedIn) navController.navigate("login")
-            else navController.navigate("seller_create")
+            if (!sessionState.isLoggedIn) navController.navigate("login") { launchSingleTop = true }
+            else navController.navigate("seller_create") { launchSingleTop = true }
             return
         }
         if (route == "profile" && !sessionState.isLoggedIn) {
-            navController.navigate("login")
+            navController.navigate("login") { launchSingleTop = true }
             return
         }
-        if (baseRoute == route && route != "marketplace") return
+        val liveBaseRoute = navController.currentDestination?.route
+            ?.substringBefore("/")
+            ?.substringBefore("?")
+        if (liveBaseRoute == route && route != "marketplace") return
         if (route == "home") {
             val popped = navController.popBackStack("home", inclusive = false)
             if (!popped) {
@@ -212,9 +302,12 @@ fun KartAppRoot(
             return
         }
         navController.navigate(route) {
-            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+            popUpTo(navController.graph.findStartDestination().id) {
+                inclusive = false
+                saveState = false
+            }
             launchSingleTop = true
-            restoreState = true
+            restoreState = false
         }
     }
 
@@ -473,9 +566,13 @@ fun KartAppRoot(
                                     conversationId = cid,
                                     currentUserId = sessionState.session.userId,
                                     viewModel = messagesVm,
-                                    onBack = { navController.popBackStack() },
+                                    onBack = {
+                                        sessionViewModel.refreshUnreadCounts()
+                                        navController.popBackStack()
+                                    },
                                     onProductClick = { pid -> navController.navigate("product/$pid") },
-                                    onShowMessage = sessionViewModel::showMessage
+                                    onShowMessage = sessionViewModel::showMessage,
+                                    onUserClick = { uid -> navController.navigate("public_profile/$uid") }
                                 )
                             }
 
@@ -701,7 +798,60 @@ fun KartAppRoot(
                                 NotificationsScreen(
                                     userId = sessionState.session.userId,
                                     viewModel = profileVm,
-                                    onBack = { navController.popBackStack() }
+                                    onBack = {
+                                        sessionViewModel.refreshUnreadCounts()
+                                        navController.popBackStack()
+                                    },
+                                    onNotificationClick = { notif ->
+                                        sessionViewModel.refreshUnreadCounts()
+                                        val rawLink = notif.link?.trim().orEmpty()
+                                        val parsedUri = runCatching {
+                                            if (rawLink.startsWith("http")) Uri.parse(rawLink)
+                                            else Uri.parse("https://www.kart.cx/${rawLink.trimStart('/')}")
+                                        }.getOrNull()
+                                        val path = parsedUri?.path?.trimEnd('/').orEmpty()
+                                        val segments = parsedUri?.pathSegments.orEmpty()
+                                        val type = notif.type.orEmpty().lowercase()
+
+                                        when {
+                                            (path.startsWith("/marketplace/") || path.startsWith("/product/")) &&
+                                                segments.size >= 2 && segments[1] != "categories" -> {
+                                                navController.navigate("product/${segments[1]}")
+                                            }
+                                            path.contains("/orders/") && segments.lastOrNull()?.isNotBlank() == true -> {
+                                                navController.navigate("order_detail/${segments.last()}")
+                                            }
+                                            path.contains("/seller/orders") -> navController.navigate("seller_orders")
+                                            path.endsWith("/orders") -> navController.navigate("orders")
+                                            (path.startsWith("/messages/") || path.startsWith("/chat/")) && segments.size >= 2 -> {
+                                                navController.navigate("chat/${segments[1]}")
+                                            }
+                                            path.startsWith("/messages") -> {
+                                                val convId = parsedUri?.getQueryParameter("conversation")
+                                                    ?: parsedUri?.getQueryParameter("id")
+                                                if (!convId.isNullOrBlank()) navController.navigate("chat/$convId")
+                                                else navigateTopTab("messages")
+                                            }
+                                            path.startsWith("/profile/") && segments.size >= 2 -> {
+                                                navController.navigate("public_profile/${segments[1]}")
+                                            }
+                                            path == "/profile" -> navigateTopTab("profile")
+                                            path.contains("/wallet") -> navController.navigate("wallet")
+                                            path.contains("/subscription") -> navController.navigate("subscriptions")
+                                            path.contains("/verify") -> navController.navigate("verify_identity")
+                                            path.contains("/wishlist") -> navController.navigate("wishlist")
+                                            path.startsWith("/seller") || path.startsWith("/dashboard") -> {
+                                                navController.navigate("seller_dashboard")
+                                            }
+                                            type.contains("order") -> navController.navigate("orders")
+                                            type.contains("message") || type.contains("chat") -> navigateTopTab("messages")
+                                            type.contains("wallet") || type.contains("payout") || type.contains("withdraw") || type.contains("deposit") -> {
+                                                navController.navigate("wallet")
+                                            }
+                                            type.contains("verify") || type.contains("kyc") -> navController.navigate("verify_identity")
+                                            type.contains("follow") || type.contains("review") -> navigateTopTab("profile")
+                                        }
+                                    }
                                 )
                             }
 
@@ -761,6 +911,25 @@ fun KartAppRoot(
                                 onTabSelected = ::navigateTopTab,
                                 modifier = Modifier.align(Alignment.BottomCenter)
                             )
+                        }
+
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = !isOnline,
+                            modifier = Modifier.align(Alignment.TopCenter)
+                        ) {
+                            androidx.compose.material3.Surface(
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                shadowElevation = 4.dp,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                androidx.compose.material3.Text(
+                                    text = "You're offline. Check your connection.",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier
+                                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                                )
+                            }
                         }
 
                         SnackbarHost(

@@ -209,7 +209,7 @@ fun HomeScreen(
                     // Latest on Campus Grid
                     item(key = "latest_header") {
                         KartSectionHeader(
-                            title = "Latest on Campus",
+                            title = "Recommended for you",
                             actionLabel = "Browse Shop",
                             onActionClick = onExploreMarketplace,
                             modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 26.dp, bottom = 12.dp)

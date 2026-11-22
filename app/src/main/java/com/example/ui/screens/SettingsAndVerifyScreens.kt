@@ -34,6 +34,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -100,20 +101,32 @@ fun SettingsHubScreen(
                 SettingsGroup("Account & Verification") {
                     SettingsRow(
                         icon = KartLucideIcons.IdCard,
-                        title = "Student Identity Verification",
-                        subtitle = if (profile?.isVerified == true) "Verified student badge active" else "Submit student ID & selfie",
+                        title = "Identity Verification",
+                        subtitle = if (profile?.isVerified == true) "Verified badge active" else "Submit ID & selfie",
                         onClick = onNavigateVerify
                     )
                     SettingsRow(
                         icon = KartLucideIcons.Mail,
                         title = "Email Verification",
-                        subtitle = profile?.email ?: "Verify your student email",
+                        subtitle = when {
+                            profile?.emailVerified == true && !profile.email.isNullOrBlank() -> "Verified • ${profile.email}"
+                            profile?.emailVerified == true -> "Verified"
+                            !profile?.email.isNullOrBlank() -> "${profile?.email} • Pending verification"
+                            else -> "Verify your student email"
+                        },
+                        tint = if (profile?.emailVerified == true) KartSuccess else KartPrimary,
                         onClick = { onNavigateSection("email") }
                     )
                     SettingsRow(
                         icon = KartLucideIcons.Phone,
                         title = "Phone Number Verification",
-                        subtitle = profile?.phone ?: "Add & verify Ghana mobile number",
+                        subtitle = when {
+                            profile?.phoneVerified == true && !profile.phone.isNullOrBlank() -> "Verified • ${profile.phone}"
+                            profile?.phoneVerified == true -> "Verified"
+                            !profile?.phone.isNullOrBlank() -> "${profile?.phone} • Pending verification"
+                            else -> "Add & verify Ghana mobile number"
+                        },
+                        tint = if (profile?.phoneVerified == true) KartSuccess else KartPrimary,
                         onClick = { onNavigateSection("phone") }
                     )
                     SettingsRow(
@@ -280,6 +293,12 @@ fun SettingsDetailScreen(
     val emailNotifs by sessionViewModel.emailNotifsEnabled.collectAsStateWithLifecycle()
     var loading by remember { mutableStateOf(false) }
 
+    LaunchedEffect(section) {
+        if (section == "email" || section == "phone") {
+            sessionViewModel.refreshUserMetadata()
+        }
+    }
+
     val screenTitle = when (section) {
         "email" -> "Email Verification"
         "phone" -> "Phone Verification"
@@ -307,71 +326,227 @@ fun SettingsDetailScreen(
         ) {
             when (section) {
                 "email" -> item {
-                    var email by remember { mutableStateOf(profile?.email.orEmpty()) }
+                    var email by remember(profile?.email) { mutableStateOf(profile?.email.orEmpty()) }
                     var otp by remember { mutableStateOf("") }
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        KartTextField(email, { email = it }, "Campus Email", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
-                        KartOutlineButton(
-                            text = "Send Verification Code",
-                            onClick = {
-                                scope.launch {
-                                    loading = true
-                                    val r = repository.sendEmailVerificationOtp(email)
-                                    loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "Verification OTP sent!" else (r as ApiResult.Error).message)
+                    var verifiedNow by remember { mutableStateOf(false) }
+                    var isChanging by remember { mutableStateOf(false) }
+                    val isAlreadyVerified = (profile?.emailVerified == true || verifiedNow) && !isChanging
+
+                    if (isAlreadyVerified) {
+                        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(18.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            KartLucideIcons.CheckCircle,
+                                            contentDescription = null,
+                                            tint = KartSuccess,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Text(
+                                            "Email Already Verified",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    if (email.isNotBlank()) {
+                                        Text(
+                                            email,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Text(
+                                        "Your email address is verified and linked to your Kart account. No further action is needed.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartThemeTokens.colors.textSecondary
+                                    )
                                 }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        KartTextField(otp, { otp = it.filter(Char::isDigit).take(6) }, "Enter 6-Digit OTP", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                        KartPrimaryButton(
-                            text = "Verify Email",
-                            loading = loading,
-                            enabled = otp.length >= 4,
-                            onClick = {
-                                scope.launch {
-                                    loading = true
-                                    val r = repository.verifyEmailOtp(email, otp)
-                                    loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "Email verified!" else (r as ApiResult.Error).message)
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                            }
+                            KartPrimaryButton(
+                                text = "Done",
+                                onClick = onBack,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            KartOutlineButton(
+                                text = "Verify a Different Email",
+                                onClick = {
+                                    isChanging = true
+                                    otp = ""
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            KartTextField(email, { email = it }, "Campus Email", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
+                            KartOutlineButton(
+                                text = "Send Verification Code",
+                                onClick = {
+                                    scope.launch {
+                                        loading = true
+                                        val r = repository.sendEmailVerificationOtp(email)
+                                        loading = false
+                                        onShowMessage(if (r is ApiResult.Success) "Verification OTP sent!" else (r as ApiResult.Error).message)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            KartTextField(otp, { otp = it.filter(Char::isDigit).take(6) }, "Enter 6-Digit OTP", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                            KartPrimaryButton(
+                                text = "Verify Email",
+                                loading = loading,
+                                enabled = otp.length >= 4,
+                                onClick = {
+                                    scope.launch {
+                                        loading = true
+                                        val r = repository.verifyEmailOtp(email, otp)
+                                        loading = false
+                                        if (r is ApiResult.Success) {
+                                            verifiedNow = true
+                                            isChanging = false
+                                            otp = ""
+                                            sessionViewModel.refreshUserMetadata()
+                                            onShowMessage("Email verified!")
+                                        } else {
+                                            onShowMessage((r as ApiResult.Error).message)
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            if (isChanging) {
+                                KartOutlineButton(
+                                    text = "Cancel",
+                                    onClick = {
+                                        isChanging = false
+                                        email = profile?.email.orEmpty()
+                                        otp = ""
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
                 }
                 "phone" -> item {
-                    var phone by remember { mutableStateOf(profile?.phone.orEmpty()) }
+                    var phone by remember(profile?.phone) { mutableStateOf(profile?.phone.orEmpty()) }
                     var otp by remember { mutableStateOf("") }
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        KartTextField(phone, { phone = it }, "Mobile Number", placeholder = "+233540000000", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
-                        KartOutlineButton(
-                            text = "Send SMS OTP",
-                            onClick = {
-                                scope.launch {
-                                    loading = true
-                                    val r = repository.sendPhoneOtp(phone)
-                                    loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "SMS OTP sent!" else (r as ApiResult.Error).message)
+                    var verifiedNow by remember { mutableStateOf(false) }
+                    var isChanging by remember { mutableStateOf(false) }
+                    val isAlreadyVerified = (profile?.phoneVerified == true || verifiedNow) && !isChanging
+
+                    if (isAlreadyVerified) {
+                        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(18.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            KartLucideIcons.CheckCircle,
+                                            contentDescription = null,
+                                            tint = KartSuccess,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Text(
+                                            "Phone Number Already Verified",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    if (phone.isNotBlank()) {
+                                        Text(
+                                            phone,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Text(
+                                        "Your mobile number is verified and active on your Kart account. No further action is needed.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartThemeTokens.colors.textSecondary
+                                    )
                                 }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        KartTextField(otp, { otp = it.filter(Char::isDigit).take(6) }, "SMS Verification Code", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                        KartPrimaryButton(
-                            text = "Verify Phone",
-                            loading = loading,
-                            enabled = otp.length >= 4,
-                            onClick = {
-                                scope.launch {
-                                    loading = true
-                                    val r = repository.verifyPhoneOtp(phone, otp)
-                                    loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "Phone number verified!" else (r as ApiResult.Error).message)
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                            }
+                            KartPrimaryButton(
+                                text = "Done",
+                                onClick = onBack,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            KartOutlineButton(
+                                text = "Change Phone Number",
+                                onClick = {
+                                    isChanging = true
+                                    otp = ""
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            KartTextField(phone, { phone = it }, "Mobile Number", placeholder = "+233540000000", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
+                            KartOutlineButton(
+                                text = "Send SMS OTP",
+                                onClick = {
+                                    scope.launch {
+                                        loading = true
+                                        val r = repository.sendPhoneOtp(phone)
+                                        loading = false
+                                        onShowMessage(if (r is ApiResult.Success) "SMS OTP sent!" else (r as ApiResult.Error).message)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            KartTextField(otp, { otp = it.filter(Char::isDigit).take(6) }, "SMS Verification Code", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                            KartPrimaryButton(
+                                text = "Verify Phone",
+                                loading = loading,
+                                enabled = otp.length >= 4,
+                                onClick = {
+                                    scope.launch {
+                                        loading = true
+                                        val r = repository.verifyPhoneOtp(phone, otp)
+                                        loading = false
+                                        if (r is ApiResult.Success) {
+                                            verifiedNow = true
+                                            isChanging = false
+                                            otp = ""
+                                            sessionViewModel.refreshUserMetadata()
+                                            onShowMessage("Phone number verified!")
+                                        } else {
+                                            onShowMessage((r as ApiResult.Error).message)
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            if (isChanging) {
+                                KartOutlineButton(
+                                    text = "Cancel",
+                                    onClick = {
+                                        isChanging = false
+                                        phone = profile?.phone.orEmpty()
+                                        otp = ""
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
                 }
                 "payout" -> item {
@@ -582,20 +757,17 @@ fun IdentityVerificationScreen(
     var submitting by remember { mutableStateOf(false) }
     var submitted by remember { mutableStateOf(profile?.verificationStatus.equals("Pending", true)) }
 
+    var activeCameraTarget by remember { mutableStateOf<String?>(null) }
+
     val idPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) idPhotoUri = uri
     }
     val selfiePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) selfieUri = uri
     }
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) {
-            onShowMessage("Camera access granted. Select or capture your verification photo.")
-            selfiePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-        } else {
-            onShowMessage("Camera permission denied. You can still upload a clear photo from gallery.")
-            selfiePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-        }
+
+    fun requestCamera(target: String) {
+        activeCameraTarget = target
     }
 
     Column(
@@ -603,13 +775,13 @@ fun IdentityVerificationScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        KartSubScreenTopBar(title = "Student Verification", onBack = onBack)
+        KartSubScreenTopBar(title = "Identity Verification", onBack = onBack)
 
         if (profile?.isVerified == true) {
             EmptyStateView(
                 asset = EmptyStateAsset.VERIFICATION,
                 title = "You're Verified!",
-                subtitle = "Your blue verified campus student badge is active on your profile and listings.",
+                subtitle = "Your blue verified badge is active on your profile and listings.",
                 actionLabel = "Done",
                 onActionClick = onBack,
                 modifier = Modifier
@@ -623,7 +795,7 @@ fun IdentityVerificationScreen(
             EmptyStateView(
                 asset = EmptyStateAsset.VERIFICATION_PENDING,
                 title = "Verification Under Review",
-                subtitle = "Our campus trust team is reviewing your Student ID and selfie. You'll receive a notification shortly.",
+                subtitle = "Our trust team is reviewing your ID and selfie. You'll receive a notification shortly.",
                 actionLabel = "Back to Settings",
                 onActionClick = onBack,
                 modifier = Modifier
@@ -639,7 +811,7 @@ fun IdentityVerificationScreen(
         ) {
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("1. Student ID", "2. Selfie", "3. Review").forEachIndexed { idx, label ->
+                    listOf("1. ID Card", "2. Selfie", "3. Review").forEachIndexed { idx, label ->
                         KartChip(label = label, selected = step == idx, onClick = { step = idx })
                     }
                 }
@@ -648,23 +820,34 @@ fun IdentityVerificationScreen(
             when (step) {
                 0 -> item {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                        Text("Step 1: Upload Student ID", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                        Text("Take or select a clear photo of your valid university ID card.", style = MaterialTheme.typography.bodyMedium, color = tokens.textSecondary)
-                        KartTextField(studentIdNum, { studentIdNum = it }, "Student ID Number", placeholder = "e.g. 10948271")
+                        Text("Step 1: Upload ID", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text("Take or select a clear photo of your valid government or institutional ID card.", style = MaterialTheme.typography.bodyMedium, color = tokens.textSecondary)
+                        KartTextField(studentIdNum, { studentIdNum = it }, "ID Number", placeholder = "e.g. GHA-10948271-0")
                         if (idPhotoUri != null) {
                             AsyncImage(
                                 model = idPhotoUri,
-                                contentDescription = "Student ID preview",
+                                contentDescription = "ID preview",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(16.dp))
                             )
                         }
-                        KartOutlineButton(
-                            text = if (idPhotoUri == null) "Select Student ID Photo" else "Change ID Photo",
-                            icon = KartLucideIcons.IdCard,
-                            onClick = { idPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.fillMaxWidth()
-                        )
+                        ) {
+                            KartOutlineButton(
+                                text = "Take Photo",
+                                icon = KartLucideIcons.Camera,
+                                onClick = { requestCamera("id") },
+                                modifier = Modifier.weight(1f)
+                            )
+                            KartOutlineButton(
+                                text = "Upload Photo",
+                                icon = KartLucideIcons.Image,
+                                onClick = { idPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                         KartPrimaryButton(
                             text = "Continue to Face Capture",
                             enabled = idPhotoUri != null && studentIdNum.isNotBlank(),
@@ -676,7 +859,7 @@ fun IdentityVerificationScreen(
                 1 -> item {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         Text("Step 2: Face Verification", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                        Text("Provide a clear, well-lit selfie matching your student ID card.", style = MaterialTheme.typography.bodyMedium, color = tokens.textSecondary)
+                        Text("Provide a clear, well-lit selfie matching your ID card.", style = MaterialTheme.typography.bodyMedium, color = tokens.textSecondary)
                         if (selfieUri != null) {
                             AsyncImage(
                                 model = selfieUri,
@@ -685,19 +868,23 @@ fun IdentityVerificationScreen(
                                 modifier = Modifier.fillMaxWidth().height(210.dp).clip(RoundedCornerShape(16.dp))
                             )
                         }
-                        KartOutlineButton(
-                            text = if (selfieUri == null) "Capture / Upload Selfie" else "Retake Selfie",
-                            icon = KartLucideIcons.Smile,
-                            onClick = {
-                                val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                                if (granted) {
-                                    selfiePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                                } else {
-                                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                                }
-                            },
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.fillMaxWidth()
-                        )
+                        ) {
+                            KartOutlineButton(
+                                text = "Take Photo",
+                                icon = KartLucideIcons.Camera,
+                                onClick = { requestCamera("selfie") },
+                                modifier = Modifier.weight(1f)
+                            )
+                            KartOutlineButton(
+                                text = "Upload Photo",
+                                icon = KartLucideIcons.Image,
+                                onClick = { selfiePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                         KartPrimaryButton(
                             text = "Review Submission",
                             enabled = selfieUri != null,
@@ -714,10 +901,60 @@ fun IdentityVerificationScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(KartLucideIcons.CheckCircle, contentDescription = null, tint = KartSuccess)
                                     Spacer(Modifier.width(8.dp))
-                                    Text("Student ID #: $studentIdNum", fontWeight = FontWeight.Bold)
+                                    Text("ID #: $studentIdNum", fontWeight = FontWeight.Bold)
                                 }
                                 Text("ID Document: ${if (idPhotoUri != null) "Attached" else "Missing"}", style = MaterialTheme.typography.bodySmall)
                                 Text("Selfie Capture: ${if (selfieUri != null) "Attached" else "Missing"}", style = MaterialTheme.typography.bodySmall)
+                                if (idPhotoUri != null || selfieUri != null) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        if (idPhotoUri != null) {
+                                            Column(
+                                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text(
+                                                    text = "ID Card",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = tokens.textSecondary
+                                                )
+                                                AsyncImage(
+                                                    model = idPhotoUri,
+                                                    contentDescription = "ID review preview",
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(120.dp)
+                                                        .clip(RoundedCornerShape(12.dp))
+                                                )
+                                            }
+                                        }
+                                        if (selfieUri != null) {
+                                            Column(
+                                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text(
+                                                    text = "Selfie",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = tokens.textSecondary
+                                                )
+                                                AsyncImage(
+                                                    model = selfieUri,
+                                                    contentDescription = "Selfie review preview",
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(120.dp)
+                                                        .clip(RoundedCornerShape(12.dp))
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         KartPrimaryButton(
@@ -727,10 +964,16 @@ fun IdentityVerificationScreen(
                             onClick = {
                                 scope.launch {
                                     submitting = true
-                                    val idUp = repository.uploadImageUri(context.contentResolver, idPhotoUri!!, bucket = "verifications")
-                                    val selfieUp = repository.uploadImageUri(context.contentResolver, selfieUri!!, bucket = "verifications")
+                                    val idUp = repository.uploadImageUri(context.contentResolver, idPhotoUri!!, bucket = "profiles")
+                                    val selfieUp = repository.uploadImageUri(context.contentResolver, selfieUri!!, bucket = "profiles")
                                     if (idUp is ApiResult.Success && selfieUp is ApiResult.Success) {
-                                        when (val res = repository.submitKycVerification(idUp.data, selfieUp.data, studentIdNum)) {
+                                        when (val res = repository.submitKycVerification(
+                                            idImageUrl = idUp.data,
+                                            selfieImageUrl = selfieUp.data,
+                                            studentIdNumber = studentIdNum.trim(),
+                                            fullName = profile?.resolvedName.orEmpty(),
+                                            campus = profile?.campus.orEmpty()
+                                        )) {
                                             is ApiResult.Success -> {
                                                 submitting = false
                                                 submitted = true
@@ -743,7 +986,10 @@ fun IdentityVerificationScreen(
                                         }
                                     } else {
                                         submitting = false
-                                        onShowMessage("Could not upload verification photos.")
+                                        val err = (idUp as? ApiResult.Error)?.message
+                                            ?: (selfieUp as? ApiResult.Error)?.message
+                                            ?: "Could not upload verification photos."
+                                        onShowMessage(err)
                                     }
                                 }
                             },
@@ -753,5 +999,29 @@ fun IdentityVerificationScreen(
                 }
             }
         }
+    }
+
+    if (activeCameraTarget != null) {
+        val target = activeCameraTarget
+        com.example.ui.components.KartInAppCameraDialog(
+            maxPhotos = 1,
+            existingPhotoCount = 0,
+            onDismiss = { activeCameraTarget = null },
+            onPhotosCaptured = { captured ->
+                val photo = captured.firstOrNull()
+                if (photo != null) {
+                    if (target == "id") idPhotoUri = photo else selfieUri = photo
+                }
+                activeCameraTarget = null
+            },
+            onFallbackToGallery = {
+                activeCameraTarget = null
+                if (target == "id") {
+                    idPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                } else {
+                    selfiePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }
+            }
+        )
     }
 }

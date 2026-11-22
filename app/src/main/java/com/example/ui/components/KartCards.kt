@@ -297,9 +297,9 @@ fun KartCategoryTile(
             contentDescription = category.name,
             contentScale = ContentScale.Fit,
             modifier = Modifier
-                .size(82.dp)
+                .size(76.dp)
                 .align(Alignment.BottomEnd)
-                .offset(x = 8.dp, y = 8.dp)
+                .offset(x = 4.dp, y = 4.dp)
         )
     }
 }
@@ -478,45 +478,35 @@ fun PromotedBannerCarousel(
                         )
                 )
 
-                // Clean repo overlay: title + gold-cedi price & VIEW DEAL pill (zero badge clutter)
-                Column(
+                // Clean compact overlay: price + strikethrough original price (10-25% off) & compact VIEW DEAL pill
+                val discountPct = remember(item.id) { (kotlin.math.abs(item.id.hashCode()) % 16) + 10 }
+                val originalPrice = remember(item.price, discountPct) {
+                    item.price / (1.0 - (discountPct / 100.0))
+                }
+                val originalPriceText = remember(originalPrice) {
+                    KartFormatters.formatCedis(originalPrice)
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .fillMaxWidth()
-                        .padding(start = 20.dp, end = 20.dp, bottom = 32.dp)
+                        .padding(start = 18.dp, end = 18.dp, bottom = 28.dp)
                 ) {
-                    Text(
-                        text = KartFormatters.toSentenceCase(item.title),
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            fontSize = 20.sp,
-                            lineHeight = 25.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            shadow = Shadow(
-                                color = Color.Black.copy(alpha = 0.90f),
-                                offset = Offset(0f, 2f),
-                                blurRadius = 8f
-                            )
-                        ),
-                        color = Color.White,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    Spacer(Modifier.height(10.dp))
-
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.Bottom,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             Text(
                                 text = "₵",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontSize = 15.sp,
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.Black,
                                     shadow = Shadow(
                                         color = Color.Black.copy(alpha = 0.65f),
@@ -529,25 +519,43 @@ fun PromotedBannerCarousel(
                             )
                             Text(
                                 text = priceDigits,
-                                style = MaterialTheme.typography.headlineSmall.copy(
-                                    fontSize = 23.sp,
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontSize = 18.sp,
                                     fontWeight = FontWeight.Black,
-                                    letterSpacing = (-0.5).sp,
+                                    letterSpacing = (-0.3).sp,
                                     shadow = Shadow(
                                         color = Color.Black.copy(alpha = 0.70f),
-                                        offset = Offset(0f, 2f),
-                                        blurRadius = 6f
+                                        offset = Offset(0f, 1.5f),
+                                        blurRadius = 5f
                                     )
                                 ),
                                 color = Color.White
                             )
                         }
 
-                        HeroViewDealButton(
-                            arrowOffsetDp = arrowOffset,
-                            onClick = { onProductClick(item) }
-                        )
+                        if (item.price > 0.0) {
+                            Text(
+                                text = originalPriceText,
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough,
+                                    shadow = Shadow(
+                                        color = Color.Black.copy(alpha = 0.65f),
+                                        offset = Offset(0f, 1f),
+                                        blurRadius = 4f
+                                    )
+                                ),
+                                color = Color.White.copy(alpha = 0.72f),
+                                modifier = Modifier.padding(bottom = 2.dp)
+                            )
+                        }
                     }
+
+                    HeroViewDealButton(
+                        arrowOffsetDp = arrowOffset,
+                        onClick = { onProductClick(item) }
+                    )
                 }
             }
         }
@@ -618,15 +626,15 @@ private fun HeroViewDealButton(
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
         ) {
             Text(
                 text = "VIEW DEAL",
-                style = MaterialTheme.typography.labelMedium.copy(
-                    fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Black,
-                    letterSpacing = 0.8.sp
+                    letterSpacing = 0.6.sp
                 ),
                 color = KartHeroCtaText
             )
@@ -635,7 +643,7 @@ private fun HeroViewDealButton(
                 contentDescription = null,
                 tint = KartHeroCtaText,
                 modifier = Modifier
-                    .size(14.dp)
+                    .size(12.dp)
                     .offset(x = arrowOffsetDp.dp)
             )
         }
@@ -665,19 +673,26 @@ fun UserAvatar(
                 .clip(CircleShape)
                 .background(KartPrimary.copy(alpha = 0.16f))
         ) {
-            if (!avatarUrl.isNullOrBlank()) {
+            Text(
+                text = initials,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = KartPrimary
+            )
+            val resolvedAvatarUrl = avatarUrl
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { url ->
+                    if (url.contains("api.dicebear.com")) {
+                        url.replace("/svg?", "/png?").replace(Regex("/svg$"), "/png")
+                    } else url
+                }
+            if (resolvedAvatarUrl != null) {
                 AsyncImage(
-                    model = avatarUrl,
+                    model = resolvedAvatarUrl,
                     contentDescription = displayName,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Text(
-                    text = initials,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = KartPrimary
                 )
             }
         }

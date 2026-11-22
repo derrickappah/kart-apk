@@ -1,0 +1,55 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Back ticket -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M22,26 L70,26 C72.2,26 74,27.8 74,30 L74,40 A5,5 0 0,0 74,50 L74,60 C74,62.2 72.2,64 70,64 L22,64 C19.8,64 18,62.2 18,60 L18,50 A5,5 0 0,0 18,40 L18,30 C18,27.8 19.8,26 22,26 Z" />
+
+    <!-- Front ticket -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,35 L74,35 C76.2,35 78,36.8 78,39 L78,48 A5,5 0 0,0 78,58 L78,67 C78,69.2 76.2,71 74,71 L24,71 C21.8,71 20,69.2 20,67 L20,58 A5,5 0 0,0 20,48 L20,39 C20,36.8 21.8,35 24,35 Z" />
+
+    <!-- Ticket stub accent -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M58,35 L74,35 C76.2,35 78,36.8 78,39 L78,48 A5,5 0 0,0 78,58 L78,67 C78,69.2 76.2,71 74,71 L58,71 Z" />
+
+    <!-- Star emblem on ticket -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M39,44 L41.5,49.5 L47.5,50.2 L43,54.2 L44.2,60 L39,57 L33.8,60 L35,54.2 L30.5,50.2 L36.5,49.5 Z" />
+
+    <!-- Outlines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M20,35 L20,30 C20,27.8 21.8,26 24,26 L70,26 C72.2,26 74,27.8 74,30 L74,35" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M24,35 L74,35 C76.2,35 78,36.8 78,39 L78,48 A5,5 0 0,0 78,58 L78,67 C78,69.2 76.2,71 74,71 L24,71 C21.8,71 20,69.2 20,67 L20,58 A5,5 0 0,0 20,48 L20,39 C20,36.8 21.8,35 24,35 Z" />
+
+    <!-- Perforation ticks -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round"
+        android:pathData="M58,41 L58,45 M58,51 L58,55 M58,61 L58,65" />
+</vector>

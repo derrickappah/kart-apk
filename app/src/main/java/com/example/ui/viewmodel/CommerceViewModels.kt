@@ -149,13 +149,45 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
     private val _uiState = MutableStateFlow(MessagesUiState())
     val uiState: StateFlow<MessagesUiState> = _uiState.asStateFlow()
 
+    private var cachedUserId: String? = null
+    private val messagesCache = mutableMapOf<String, List<MessageRow>>()
+
     fun loadConversations(userId: String) {
-        viewModelScope.launch {
+        val isSameUser = cachedUserId == userId
+        if (!isSameUser) {
+            cachedUserId = userId
+            messagesCache.clear()
+        }
+        val hasCachedConversations = isSameUser && _uiState.value.conversations.isNotEmpty()
+        if (!hasCachedConversations) {
             _uiState.update { it.copy(loading = true, error = null) }
+        }
+        viewModelScope.launch {
             when (val res = repository.fetchConversations(userId)) {
-                is ApiResult.Success -> _uiState.update { it.copy(loading = false, conversations = res.data) }
-                is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = res.message) }
+                is ApiResult.Success -> {
+                    val sorted = res.data.sortedByDescending { it.lastMessage?.createdAt ?: it.updatedAt.orEmpty() }
+                    _uiState.update { it.copy(loading = false, conversations = sorted, error = null) }
+                }
+                is ApiResult.Error -> _uiState.update {
+                    it.copy(loading = false, error = if (hasCachedConversations) null else res.message)
+                }
             }
+        }
+    }
+
+    private fun bumpConversationToTop(conversationId: String, latestMessage: MessageRow) {
+        _uiState.update { state ->
+            val idx = state.conversations.indexOfFirst { it.id == conversationId }
+            if (idx < 0) return@update state
+            val updatedConv = state.conversations[idx].copy(
+                lastMessage = latestMessage,
+                updatedAt = latestMessage.createdAt ?: state.conversations[idx].updatedAt
+            )
+            val reordered = buildList {
+                add(updatedConv)
+                state.conversations.forEachIndexed { i, c -> if (i != idx) add(c) }
+            }
+            state.copy(conversations = reordered)
         }
     }
 
@@ -164,34 +196,99 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
     fun loadThread(conversationId: String, silent: Boolean = false) {
         val isDifferentThread = activeThreadId != conversationId
         activeThreadId = conversationId
-        if (!silent || isDifferentThread) {
+
+        val cached = messagesCache[conversationId].orEmpty()
+        val hasCache = cached.isNotEmpty()
+
+        if (isDifferentThread) {
             _uiState.update {
                 it.copy(
-                    loading = true,
-                    activeMessages = if (isDifferentThread) emptyList() else it.activeMessages,
+                    loading = !hasCache,
+                    activeMessages = cached,
                     error = null
                 )
             }
+        } else if (!silent && !hasCache) {
+            _uiState.update { it.copy(loading = true, error = null) }
         }
+
+        val lastServerCreatedAt = cached
+            .lastOrNull { it.id?.startsWith("local_") != true && !it.createdAt.isNullOrBlank() }
+            ?.createdAt
+
         viewModelScope.launch {
-            when (val res = repository.fetchMessagesForConversation(conversationId)) {
-                is ApiResult.Success -> _uiState.update { it.copy(loading = false, activeMessages = res.data) }
-                is ApiResult.Error -> if (!silent) _uiState.update { it.copy(loading = false, error = res.message) }
+            when (val res = repository.fetchMessagesForConversation(conversationId, afterCreatedAt = lastServerCreatedAt)) {
+                is ApiResult.Success -> {
+                    val incoming = res.data
+                    val base = messagesCache[conversationId].orEmpty()
+                    val combinedServer = if (lastServerCreatedAt != null && base.isNotEmpty()) {
+                        val existingIds = base.mapNotNull { it.id }.toHashSet()
+                        val fresh = incoming.filter { it.id == null || it.id !in existingIds }
+                        if (fresh.isEmpty()) base else base + fresh
+                    } else {
+                        incoming
+                    }
+                    messagesCache[conversationId] = combinedServer
+                    if (incoming.isNotEmpty()) {
+                        combinedServer.lastOrNull()?.let { bumpConversationToTop(conversationId, it) }
+                    }
+
+                    if (activeThreadId == conversationId) {
+                        _uiState.update { state ->
+                            val pendingLocal = state.activeMessages.filter { it.id?.startsWith("local_") == true }
+                            val merged = if (pendingLocal.isEmpty()) combinedServer else combinedServer + pendingLocal
+                            state.copy(loading = false, activeMessages = merged, error = null)
+                        }
+                    }
+                }
+                is ApiResult.Error -> {
+                    if (!silent && !hasCache && activeThreadId == conversationId) {
+                        _uiState.update { it.copy(loading = false, error = res.message) }
+                    }
+                }
             }
         }
     }
 
     fun sendMessage(conversationId: String, senderId: String, text: String) {
         if (text.isBlank()) return
+        val localId = "local_${java.util.UUID.randomUUID()}"
+        val optimistic = MessageRow(
+            id = localId,
+            conversationId = conversationId,
+            senderId = senderId,
+            content = text,
+            createdAt = java.time.Instant.now().toString(),
+            isRead = false
+        )
+        _uiState.update { it.copy(activeMessages = it.activeMessages + optimistic) }
+        bumpConversationToTop(conversationId, optimistic)
+
         viewModelScope.launch {
-            _uiState.update { it.copy(sending = true) }
             when (val res = repository.sendMessage(conversationId, senderId, text)) {
                 is ApiResult.Success -> {
-                    _uiState.update {
-                        it.copy(sending = false, activeMessages = it.activeMessages + res.data)
+                    val serverMsg = res.data
+                    val cached = messagesCache[conversationId].orEmpty()
+                    if (cached.none { it.id == serverMsg.id }) {
+                        messagesCache[conversationId] = cached + serverMsg
+                    }
+                    _uiState.update { state ->
+                        val withoutDuplicate = state.activeMessages.filterNot {
+                            it.id == serverMsg.id && it.id != localId
+                        }
+                        val updated = withoutDuplicate.map { if (it.id == localId) serverMsg else it }
+                        state.copy(sending = false, activeMessages = updated)
                     }
                 }
-                is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = res.message) }
+                is ApiResult.Error -> {
+                    _uiState.update { state ->
+                        state.copy(
+                            sending = false,
+                            activeMessages = state.activeMessages.filterNot { it.id == localId },
+                            feedback = res.message
+                        )
+                    }
+                }
             }
         }
     }
@@ -204,6 +301,31 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                     sendMessage(conversationId, senderId, "[IMAGE:${upload.data}]")
                 }
                 is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
+            }
+        }
+    }
+
+    fun sendVoiceMessage(conversationId: String, senderId: String, audioFile: java.io.File, durationSeconds: Int) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(sending = true) }
+            try {
+                when (val upload = repository.uploadAudioFile(audioFile, bucket = "products")) {
+                    is ApiResult.Success -> {
+                        sendMessage(conversationId, senderId, "[VOICE:${upload.data}|${durationSeconds.coerceAtLeast(1)}]")
+                    }
+                    is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
+                }
+            } finally {
+                runCatching { audioFile.delete() }
+            }
+        }
+    }
+
+    fun reportUser(targetUserId: String, reason: String, details: String) {
+        viewModelScope.launch {
+            when (val res = repository.submitReport("user", targetUserId, reason, details)) {
+                is ApiResult.Success -> _uiState.update { it.copy(feedback = "User reported to Kart moderation.") }
+                is ApiResult.Error -> _uiState.update { it.copy(feedback = res.message) }
             }
         }
     }
@@ -359,7 +481,7 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
             val result = if (editProductId.isNullOrBlank()) {
                 repository.createListing(sellerId, title, description, price, category, condition, campus, stock, uploadedUrls)
             } else {
-                repository.updateListing(editProductId, title, description, price, category, condition, campus, "Active", uploadedUrls)
+                repository.updateListing(editProductId, title, description, price, category, condition, campus, stock, uploadedUrls)
             }
             when (result) {
                 is ApiResult.Success -> {

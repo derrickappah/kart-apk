@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "542920707023",
+    "project_id": "kart-627b2",
+    "storage_bucket": "kart-627b2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:542920707023:android:519834c453054c32d220ba",
+        "android_client_info": {
+          "package_name": "com.aistudio.kart.kxmpzq"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDfgr-98W034oMwBme7guLp49NhDNXPvH0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

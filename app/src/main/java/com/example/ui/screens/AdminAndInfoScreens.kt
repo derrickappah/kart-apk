@@ -208,7 +208,7 @@ fun StaticInfoScreen(
             "about" -> "About Kart" to listOf(
                 "Built for Campus Commerce" to "Kart (kart.cx) is Ghana's trusted student-to-student campus marketplace. Buy and sell textbooks, laptops, clothing, dorm essentials, and services right on your university campus.",
                 "Escrow-First Trust" to "Every paid order on Kart is protected by Escrow. Funds are safely held until the buyer physically inspects the item on campus and confirms delivery with their Delivery PIN or OTP.",
-                "Verified Campus Community" to "Student ID and selfie verification badges help you recognize trusted classmates across University of Ghana, KNUST, UCC, Ashesi, UPSA, GIMPA, and more."
+                "Verified Campus Community" to "ID and selfie verification badges help you recognize trusted buyers and sellers across University of Ghana, KNUST, UCC, Ashesi, UPSA, GIMPA, and more."
             )
             "faq" -> "Frequently Asked Questions" to listOf(
                 "How does Kart Escrow work?" to "When you pay via Mobile Money, Card, or Kart Wallet, funds stay safely held by Kart until you meet the seller, inspect your item, and confirm delivery with your 4-digit PIN or OTP.",
@@ -229,7 +229,7 @@ fun StaticInfoScreen(
                 "Escrow & Platform Fees" to "Kart applies transparent service fees on completed marketplace transactions to maintain escrow security, verification, and campus support."
             )
             else -> "Privacy Policy" to listOf(
-                "Data Protection" to "Kart collects only the account, campus, and transaction information necessary to operate secure peer-to-peer commerce and student verification.",
+                "Data Protection" to "Kart collects only the account, campus, and transaction information necessary to operate secure peer-to-peer commerce and identity verification.",
                 "Account Deletion" to "You may request permanent deletion of your Kart account and associated personal data at any time from Settings → Delete Account."
             )
         }

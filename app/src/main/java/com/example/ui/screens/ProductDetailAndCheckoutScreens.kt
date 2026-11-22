@@ -122,6 +122,11 @@ fun CheckoutScreen(
             )
         } else {
             val item = product!!
+            val isOutOfStock = (item.stockQuantity ?: 1) <= 0
+            val isInactive = !item.status.isNullOrBlank() && !item.status.equals("Active", ignoreCase = true)
+            val isSelfPurchase = !currentUserId.isNullOrBlank() &&
+                (item.sellerId == currentUserId || item.seller?.id == currentUserId)
+            val canCheckout = !isOutOfStock && !isInactive && !isSelfPurchase
             val maxStock = (item.stockQuantity ?: 10).coerceAtLeast(1)
             val subtotal = item.price * quantity
             val canPayWallet = walletBalance >= subtotal
@@ -272,9 +277,15 @@ fun CheckoutScreen(
                         .padding(16.dp)
                 ) {
                     KartPrimaryButton(
-                        text = if (paymentMethod == "wallet") "Pay with Kart Wallet" else "Proceed to Paystack",
+                        text = when {
+                            isSelfPurchase -> "Cannot Buy Your Own Listing"
+                            isOutOfStock -> "Out of Stock"
+                            isInactive -> "Listing Unavailable"
+                            paymentMethod == "wallet" -> "Pay with Kart Wallet"
+                            else -> "Proceed to Paystack"
+                        },
                         loading = submitting,
-                        enabled = paymentMethod == "paystack" || canPayWallet,
+                        enabled = canCheckout && (paymentMethod == "paystack" || canPayWallet),
                         onClick = {
                             scope.launch {
                                 submitting = true

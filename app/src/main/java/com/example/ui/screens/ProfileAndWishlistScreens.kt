@@ -9,6 +9,14 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,7 +60,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.domain.model.EmptyStateAsset
@@ -143,10 +153,7 @@ fun ProfileScreen(
         }
 
         if (state.loading && state.bundle == null) {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(20.dp)) {
-                ShimmerBox(modifier = Modifier.fillMaxWidth().height(150.dp))
-                ShimmerBox(modifier = Modifier.fillMaxWidth().height(90.dp))
-            }
+            ProfileScreenSkeleton(isOwnProfile = isOwnProfile)
         } else if (state.bundle == null) {
             EmptyStateView(
                 asset = EmptyStateAsset.ERROR,
@@ -233,9 +240,10 @@ fun ProfileScreen(
                             }
 
                             // Social Links (Kart bundled social icons)
+                            val resolvedWhatsapp = profile.whatsappNumber?.takeIf { it.isNotBlank() } ?: profile.phone
                             val hasSocials = !profile.instagramUrl.isNullOrBlank() ||
                                 !profile.snapchatUrl.isNullOrBlank() ||
-                                !profile.whatsappNumber.isNullOrBlank()
+                                !resolvedWhatsapp.isNullOrBlank()
                             if (hasSocials) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     if (!profile.instagramUrl.isNullOrBlank()) {
@@ -252,9 +260,9 @@ fun ProfileScreen(
                                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                                         }
                                     }
-                                    if (!profile.whatsappNumber.isNullOrBlank()) {
+                                    if (!resolvedWhatsapp.isNullOrBlank()) {
                                         SocialIconButton(R.drawable.ic_social_whatsapp, "WhatsApp") {
-                                            val digits = profile.whatsappNumber.filter(Char::isDigit)
+                                            val digits = resolvedWhatsapp.filter(Char::isDigit)
                                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$digits")))
                                         }
                                     }
@@ -301,7 +309,7 @@ fun ProfileScreen(
                             }
                             if (profile.isVerified != true) {
                                 KartOutlineButton(
-                                    text = "Verify Student Identity",
+                                    text = "Verify Identity",
                                     icon = KartLucideIcons.ShieldCheck,
                                     onClick = onVerifyIdentity,
                                     modifier = Modifier.fillMaxWidth()
@@ -394,18 +402,6 @@ fun ProfileScreen(
                 }
 
                 if (isOwnProfile) {
-                    item {
-                        Spacer(Modifier.height(8.dp))
-                        KartOutlineButton(
-                            text = "Sign Out",
-                            icon = KartLucideIcons.LogOut,
-                            borderColor = KartDanger,
-                            contentColor = KartDanger,
-                            onClick = onSignOut,
-                            modifier = Modifier.fillMaxWidth(),
-                            testTag = "profile_signout_btn"
-                        )
-                    }
                 }
             }
 
@@ -490,17 +486,18 @@ fun EditProfileScreen(
     var phone by remember(initialProfile) { mutableStateOf(initialProfile?.phone.orEmpty()) }
     var instagram by remember(initialProfile) { mutableStateOf(initialProfile?.instagramUrl.orEmpty()) }
     var snapchat by remember(initialProfile) { mutableStateOf(initialProfile?.snapchatUrl.orEmpty()) }
-    var whatsapp by remember(initialProfile) { mutableStateOf(initialProfile?.whatsappNumber.orEmpty()) }
+    var whatsapp by remember(initialProfile) {
+        mutableStateOf((initialProfile?.whatsappNumber?.takeIf { it.isNotBlank() } ?: initialProfile?.phone).orEmpty())
+    }
     var avatarUrl by remember(initialProfile) { mutableStateOf(initialProfile?.avatarUrl) }
     var showAvatarSheet by remember { mutableStateOf(false) }
+    var pendingCropUri by remember { mutableStateOf<Uri?>(null) }
 
     val avatarPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            viewModel.uploadAvatar(context.contentResolver, uri) { uploadedUrl ->
-                avatarUrl = uploadedUrl
-            }
+            pendingCropUri = uri
         }
     }
 
@@ -508,6 +505,7 @@ fun EditProfileScreen(
         state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -576,6 +574,20 @@ fun EditProfileScreen(
             },
             onDismiss = { showAvatarSheet = false }
         )
+    }
+
+    if (pendingCropUri != null) {
+        AvatarCropDialog(
+            imageUri = pendingCropUri!!,
+            onCancel = { pendingCropUri = null },
+            onCropped = { croppedUri ->
+                pendingCropUri = null
+                viewModel.uploadAvatar(context.contentResolver, croppedUri) { uploadedUrl ->
+                    avatarUrl = uploadedUrl
+                }
+            }
+        )
+    }
     }
 }
 
@@ -649,38 +661,125 @@ fun WishlistScreen(
 fun NotificationsScreen(
     userId: String,
     viewModel: ProfileViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onNotificationClick: (com.example.domain.model.NotificationItem) -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tokens = KartThemeTokens.colors
+    var unreadOnly by remember { mutableStateOf(false) }
+    val easeOutStrong = remember { androidx.compose.animation.core.CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
+
     LaunchedEffect(userId) { viewModel.loadNotifications(userId) }
+
+    val unreadCount = remember(state.notifications) { state.notifications.count { it.isRead != true } }
+    val visibleNotifications = remember(state.notifications, unreadOnly) {
+        if (unreadOnly) state.notifications.filter { it.isRead != true } else state.notifications
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        KartSubScreenTopBar(title = "Notifications", onBack = onBack)
+        KartSubScreenTopBar(
+            title = "Notifications",
+            onBack = onBack,
+            actions = {
+                if (unreadCount > 0) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(KartPrimary.copy(alpha = 0.12f))
+                            .clickable {
+                                state.notifications
+                                    .filter { it.isRead != true }
+                                    .forEach { viewModel.markNotificationRead(it.id) }
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "Mark all read",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = KartPrimary
+                        )
+                    }
+                }
+            }
+        )
+
+        if (!state.loading && state.notifications.isNotEmpty()) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                listOf(false to "All (${state.notifications.size})", true to "Unread ($unreadCount)").forEach { (isUnreadTab, label) ->
+                    val selected = unreadOnly == isUnreadTab
+                    val bgColor by androidx.compose.animation.animateColorAsState(
+                        targetValue = if (selected) KartPrimary else MaterialTheme.colorScheme.surfaceVariant,
+                        animationSpec = androidx.compose.animation.core.tween(180, easing = easeOutStrong),
+                        label = "notifTabBg"
+                    )
+                    val textColor by androidx.compose.animation.animateColorAsState(
+                        targetValue = if (selected) Color.White else tokens.textSecondary,
+                        animationSpec = androidx.compose.animation.core.tween(180, easing = easeOutStrong),
+                        label = "notifTabText"
+                    )
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(bgColor)
+                            .clickable { unreadOnly = isUnreadTab }
+                            .padding(horizontal = 14.dp, vertical = 7.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = textColor
+                        )
+                    }
+                }
+            }
+        }
 
         when {
             state.loading -> {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(20.dp)) {
-                    repeat(5) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(72.dp)) }
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
+                    repeat(5) {
+                        ShimmerBox(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(78.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                        )
+                    }
                 }
             }
-            state.notifications.isEmpty() -> {
+            visibleNotifications.isEmpty() -> {
                 EmptyStateView(
                     asset = EmptyStateAsset.NOTIFICATIONS,
-                    title = "All caught up!",
-                    subtitle = "Order updates, chat alerts, and escrow confirmations will appear here.",
+                    title = if (unreadOnly) "No unread notifications" else "All caught up!",
+                    subtitle = if (unreadOnly) "You've read all your recent updates."
+                    else "Order updates, chat alerts, and escrow confirmations will appear here.",
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
                 )
             }
             else -> {
-                LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-                    items(state.notifications, key = { it.id }) { notif ->
+                LazyColumn(
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 28.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(visibleNotifications, key = { it.id }) { notif ->
+                        val isUnread = notif.isRead != true
                         val dismissState = rememberSwipeToDismissBoxState(
                             confirmValueChange = {
                                 if (it == SwipeToDismissBoxValue.EndToStart) {
@@ -689,56 +788,495 @@ fun NotificationsScreen(
                                 } else false
                             }
                         )
-                        SwipeToDismissBox(
-                            state = dismissState,
-                            enableDismissFromStartToEnd = false,
-                            backgroundContent = {
-                                Box(
-                                    contentAlignment = Alignment.CenterEnd,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(KartDanger)
-                                        .padding(horizontal = 24.dp)
-                                ) {
-                                    Icon(KartLucideIcons.Trash2, contentDescription = "Delete notification", tint = Color.White)
-                                }
-                            }
+                        val notifIcon = when {
+                            notif.type?.contains("order", ignoreCase = true) == true ||
+                                notif.title?.contains("order", ignoreCase = true) == true -> KartLucideIcons.Package
+                            notif.type?.contains("message", ignoreCase = true) == true ||
+                                notif.type?.contains("chat", ignoreCase = true) == true -> KartLucideIcons.MessageCircleInactive
+                            notif.type?.contains("verify", ignoreCase = true) == true ||
+                                notif.type?.contains("escrow", ignoreCase = true) == true -> KartLucideIcons.ShieldCheck
+                            else -> KartLucideIcons.Bell
+                        }
+                        val cardShape = RoundedCornerShape(16.dp)
+                        val borderColor by androidx.compose.animation.animateColorAsState(
+                            targetValue = if (isUnread) KartPrimary.copy(alpha = 0.30f) else tokens.cardBorder,
+                            animationSpec = androidx.compose.animation.core.tween(200, easing = easeOutStrong),
+                            label = "notifCardBorder"
+                        )
+
+                        Box(
+                            modifier = Modifier.animateItem(
+                                placementSpec = androidx.compose.animation.core.tween(
+                                    durationMillis = 240,
+                                    easing = easeOutStrong
+                                )
+                            )
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(
-                                        if (notif.isRead == true) MaterialTheme.colorScheme.background
-                                        else KartPrimary.copy(alpha = 0.06f)
-                                    )
-                                    .clickable { viewModel.markNotificationRead(notif.id) }
-                                    .padding(horizontal = 20.dp, vertical = 14.dp)
+                            SwipeToDismissBox(
+                                state = dismissState,
+                                enableDismissFromStartToEnd = false,
+                                backgroundContent = {
+                                    val isSwiping = dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+                                    Box(
+                                        contentAlignment = Alignment.CenterEnd,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(cardShape)
+                                            .background(if (isSwiping) KartDanger else Color.Transparent)
+                                            .padding(horizontal = 22.dp)
+                                    ) {
+                                        if (isSwiping) {
+                                            Icon(
+                                                KartLucideIcons.Trash2,
+                                                contentDescription = "Delete notification",
+                                                tint = Color.White
+                                            )
+                                        }
+                                    }
+                                }
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(10.dp)
-                                        .clip(CircleShape)
-                                        .background(if (notif.isRead == true) Color.Transparent else KartPrimary)
-                                )
-                                Spacer(Modifier.width(12.dp))
-                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                    Text(
-                                        notif.title ?: "Kart Update",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    if (!notif.message.isNullOrBlank()) {
-                                        Text(notif.message, style = MaterialTheme.typography.bodySmall, color = tokens.textSecondary)
+                                        .fillMaxWidth()
+                                        .clip(cardShape)
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .then(
+                                            if (isUnread) Modifier.background(KartPrimary.copy(alpha = 0.05f))
+                                            else Modifier
+                                        )
+                                        .border(1.dp, borderColor, cardShape)
+                                        .clickable {
+                                            if (isUnread) viewModel.markNotificationRead(notif.id)
+                                            onNotificationClick(notif)
+                                        }
+                                        .padding(14.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.Top,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier
+                                                .size(42.dp)
+                                                .clip(RoundedCornerShape(13.dp))
+                                                .background(
+                                                    if (isUnread) KartPrimary.copy(alpha = 0.14f)
+                                                    else MaterialTheme.colorScheme.surfaceVariant
+                                                )
+                                        ) {
+                                            Icon(
+                                                imageVector = notifIcon,
+                                                contentDescription = null,
+                                                tint = if (isUnread) KartPrimary else tokens.textSecondary,
+                                                modifier = Modifier.size(19.dp)
+                                            )
+                                        }
+
+                                        Spacer(Modifier.width(12.dp))
+
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Text(
+                                                    text = notif.title ?: "Kart Update",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Medium,
+                                                    color = tokens.textPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Text(
+                                                    text = KartFormatters.timeAgo(notif.createdAt),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (isUnread) KartPrimary else tokens.textMuted
+                                                )
+                                                if (isUnread) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(8.dp)
+                                                            .clip(CircleShape)
+                                                            .background(KartPrimary)
+                                                    )
+                                                }
+                                            }
+                                            if (!notif.message.isNullOrBlank()) {
+                                                Text(
+                                                    text = notif.message,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = tokens.textSecondary,
+                                                    lineHeight = 18.sp
+                                                )
+                                            }
+                                        }
                                     }
-                                    Text(KartFormatters.timeAgo(notif.createdAt), style = MaterialTheme.typography.labelSmall, color = tokens.textMuted)
                                 }
                             }
                         }
-                        HorizontalDivider(color = tokens.cardBorder)
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ProfileScreenSkeleton(isOwnProfile: Boolean) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp)
+    ) {
+        // Header Card Skeleton
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.padding(18.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ShimmerBox(
+                        modifier = Modifier
+                            .size(68.dp)
+                            .clip(CircleShape)
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ShimmerBox(
+                            modifier = Modifier
+                                .fillMaxWidth(0.55f)
+                                .height(20.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                        )
+                        ShimmerBox(
+                            modifier = Modifier
+                                .fillMaxWidth(0.38f)
+                                .height(13.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                        )
+                    }
+                    if (isOwnProfile) {
+                        ShimmerBox(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                        )
+                    }
+                }
+
+                // Bio line
+                ShimmerBox(
+                    modifier = Modifier
+                        .fillMaxWidth(0.82f)
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                )
+
+                // 4-column Stats Row
+                Row(
+                    horizontalArrangement = Arrangement.SpaceAround,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    repeat(4) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            ShimmerBox(
+                                modifier = Modifier
+                                    .width(34.dp)
+                                    .height(18.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                            )
+                            ShimmerBox(
+                                modifier = Modifier
+                                    .width(48.dp)
+                                    .height(11.dp)
+                                    .clip(RoundedCornerShape(5.dp))
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Quick Actions 2x2 Grid (own profile)
+        if (isOwnProfile) {
+            repeat(2) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    repeat(2) {
+                        ShimmerBox(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(68.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                        )
+                    }
+                }
+            }
+        }
+
+        // Tabs row skeleton
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            ShimmerBox(
+                modifier = Modifier
+                    .width(96.dp)
+                    .height(34.dp)
+                    .clip(RoundedCornerShape(18.dp))
+            )
+            ShimmerBox(
+                modifier = Modifier
+                    .width(96.dp)
+                    .height(34.dp)
+                    .clip(RoundedCornerShape(18.dp))
+            )
+        }
+
+        // Listings 2-column grid skeleton
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            repeat(2) {
+                ShimmerBox(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(190.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AvatarCropDialog(
+    imageUri: Uri,
+    onCancel: () -> Unit,
+    onCropped: (Uri) -> Unit
+) {
+    val context = LocalContext.current
+    var bitmap by remember(imageUri) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var scale by remember(imageUri) { mutableStateOf(1f) }
+    var offsetX by remember(imageUri) { mutableStateOf(0f) }
+    var offsetY by remember(imageUri) { mutableStateOf(0f) }
+    var cropSizePx by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(imageUri) {
+        val loaded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                val optsBounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                context.contentResolver.openInputStream(imageUri)?.use {
+                    android.graphics.BitmapFactory.decodeStream(it, null, optsBounds)
+                }
+                val maxDim = maxOf(optsBounds.outWidth, optsBounds.outHeight).coerceAtLeast(1)
+                var sample = 1
+                while (maxDim / sample > 1600) sample *= 2
+                val optsDecode = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                context.contentResolver.openInputStream(imageUri)?.use {
+                    android.graphics.BitmapFactory.decodeStream(it, null, optsDecode)
+                }
+            }.getOrNull()
+        }
+        bitmap = loaded
+    }
+
+    val easeOutStrong = remember { androidx.compose.animation.core.CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
+    val enterAnim = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(Unit) {
+        enterAnim.animateTo(
+            targetValue = 1f,
+            animationSpec = androidx.compose.animation.core.tween(durationMillis = 220, easing = easeOutStrong)
+        )
+    }
+
+    androidx.activity.compose.BackHandler(onBack = onCancel)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                val p = enterAnim.value
+                alpha = p
+                val s = 0.96f + (0.04f * p)
+                scaleX = s
+                scaleY = s
+            }
+            .background(Color(0xFF0A0A0C))
+    ) {
+        // Full-bleed interactive photo layer behind circular cutout scrim
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val newScale = (scale * zoom).coerceIn(1f, 4f)
+                        scale = newScale
+                        val limit = (cropSizePx * (newScale - 1f) * 0.7f).coerceAtLeast(160f)
+                        offsetX = (offsetX + pan.x).coerceIn(-limit, limit)
+                        offsetY = (offsetY + pan.y).coerceIn(-limit, limit)
+                    }
+                }
+        ) {
+            val bmp = bitmap
+            if (bmp != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "Crop preview",
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp)
+                        .aspectRatio(1f)
+                        .onSizeChanged { cropSizePx = it.width.toFloat() }
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offsetX
+                            translationY = offsetY
+                        }
+                )
+            }
+
+            // Translucent dark scrim with crisp circular cutout
+            androidx.compose.foundation.Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+            ) {
+                drawRect(Color.Black.copy(alpha = 0.68f))
+                val radius = (size.width - 48.dp.toPx()) / 2f
+                drawCircle(
+                    color = Color.Transparent,
+                    radius = radius,
+                    center = center,
+                    blendMode = androidx.compose.ui.graphics.BlendMode.Clear
+                )
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.9f),
+                    radius = radius,
+                    center = center,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx())
+                )
+            }
+        }
+
+        // Top Bar
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 12.dp)
+        ) {
+            IconButton(onClick = onCancel) {
+                Icon(
+                    KartLucideIcons.X,
+                    contentDescription = "Cancel",
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            Text(
+                text = "Move and Scale",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            )
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(enabled = scale != 1f || offsetX != 0f || offsetY != 0f) {
+                        scale = 1f
+                        offsetX = 0f
+                        offsetY = 0f
+                    }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = "Reset",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (scale != 1f || offsetX != 0f || offsetY != 0f) KartPrimary else Color.Transparent
+                )
+            }
+        }
+
+        // Bottom Action Bar (properly inset above system nav bar)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 20.dp)
+        ) {
+            KartOutlineButton(
+                text = "Cancel",
+                borderColor = Color.White.copy(alpha = 0.32f),
+                contentColor = Color.White,
+                onClick = onCancel,
+                modifier = Modifier.weight(1f)
+            )
+            KartPrimaryButton(
+                text = "Use Photo",
+                enabled = bitmap != null,
+                onClick = {
+                    val src = bitmap ?: return@KartPrimaryButton
+                    val outSize = 512
+                    val outBmp = android.graphics.Bitmap.createBitmap(
+                        outSize,
+                        outSize,
+                        android.graphics.Bitmap.Config.ARGB_8888
+                    )
+                    val canvas = android.graphics.Canvas(outBmp)
+                    val viewSize = cropSizePx.coerceAtLeast(1f)
+                    val baseScale = maxOf(
+                        outSize.toFloat() / src.width.toFloat(),
+                        outSize.toFloat() / src.height.toFloat()
+                    )
+                    val totalScale = baseScale * scale
+                    val dx = (outSize - src.width * totalScale) / 2f + (offsetX * (outSize / viewSize))
+                    val dy = (outSize - src.height * totalScale) / 2f + (offsetY * (outSize / viewSize))
+                    val matrix = android.graphics.Matrix().apply {
+                        postScale(totalScale, totalScale)
+                        postTranslate(dx, dy)
+                    }
+                    val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+                    canvas.drawBitmap(src, matrix, paint)
+
+                    val outFile = java.io.File(context.cacheDir, "avatar_crop_${System.currentTimeMillis()}.jpg")
+                    java.io.FileOutputStream(outFile).use { fos ->
+                        outBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, fos)
+                    }
+                    outBmp.recycle()
+                    onCropped(Uri.fromFile(outFile))
+                },
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 }

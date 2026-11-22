@@ -1,0 +1,49 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Subtle ambient halo -->
+    <path
+        android:fillColor="#1A1DADDD"
+        android:pathData="M50,18 A34,34 0 1,0 50,86 A34,34 0 1,0 50,18 Z" />
+
+    <!-- Controller body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,33 L68,33 C74.5,33 79.5,38.5 80.5,45.5 L82,59 C82.8,65.5 78.2,71 72.5,71 C68.5,71 65,68.5 63.5,64.8 L60.5,58 L35.5,58 L32.5,64.8 C31,68.5 27.5,71 23.5,71 C17.8,71 13.2,65.5 14,59 L15.5,45.5 C16.5,38.5 21.5,33 28,33 Z" />
+
+    <!-- Center touchpad -->
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M40,33 L56,33 L54,46 L42,46 Z" />
+
+    <!-- D-Pad -->
+    <path
+        android:fillColor="#1E293B"
+        android:pathData="M27,41 L31,41 L31,45 L35,45 L35,49 L31,49 L31,53 L27,53 L27,49 L23,49 L23,45 L27,45 Z" />
+
+    <!-- Action buttons -->
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M65,40 A3,3 0 1,0 65,46 A3,3 0 1,0 65,40 Z" />
+    <path
+        android:fillColor="#1DADDD"
+        android:pathData="M65,50 A3,3 0 1,0 65,56 A3,3 0 1,0 65,50 Z" />
+    <path
+        android:fillColor="#1E293B"
+        android:pathData="M60,45 A2.8,2.8 0 1,0 60,50.6 A2.8,2.8 0 1,0 60,45 Z" />
+    <path
+        android:fillColor="#1E293B"
+        android:pathData="M70,45 A2.8,2.8 0 1,0 70,50.6 A2.8,2.8 0 1,0 70,45 Z" />
+
+    <!-- Controller outline -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1E293B"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M28,33 L68,33 C74.5,33 79.5,38.5 80.5,45.5 L82,59 C82.8,65.5 78.2,71 72.5,71 C68.5,71 65,68.5 63.5,64.8 L60.5,58 L35.5,58 L32.5,64.8 C31,68.5 27.5,71 23.5,71 C17.8,71 13.2,65.5 14,59 L15.5,45.5 C16.5,38.5 21.5,33 28,33 Z" />
+</vector>

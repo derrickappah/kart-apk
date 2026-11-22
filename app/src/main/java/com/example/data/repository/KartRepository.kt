@@ -102,6 +102,8 @@ class KartRepository(
 ) {
     private val trackedAdViews = mutableSetOf<String>()
     private val trackedAdClicks = mutableSetOf<String>()
+    @Volatile
+    private var lastRegisteredFcmToken: String? = null
 
     private fun requireKeyMessage(): String =
         "Configure SUPABASE_ANON_KEY in the AI Studio Secrets panel to sign in and access account data."
@@ -343,6 +345,39 @@ class KartRepository(
         }
     }
 
+    suspend fun signInWithGoogleIdToken(idToken: String, rawNonce: String? = null): ApiResult<UserSession> {
+        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
+        return try {
+            val payload = buildMap {
+                put("provider", "google")
+                put("id_token", idToken)
+                if (!rawNonce.isNullOrBlank()) {
+                    put("nonce", rawNonce)
+                }
+            }
+            val res = supabaseApi.signInWithIdToken(body = payload)
+            if (res.isSuccessful && res.body()?.accessToken != null) {
+                val body = res.body()!!
+                val session = UserSession(
+                    accessToken = body.accessToken.orEmpty(),
+                    refreshToken = body.refreshToken.orEmpty(),
+                    userId = body.user?.id.orEmpty(),
+                    email = body.user?.email.orEmpty()
+                )
+                sessionStore.saveSession(session)
+                ApiResult.Success(session)
+            } else {
+                val errBody = res.errorBody()?.string().orEmpty()
+                ApiResult.Error(
+                    errBody.ifBlank { "Google sign-in failed (${res.code()}). Please try again." },
+                    res.code()
+                )
+            }
+        } catch (e: Exception) {
+            ApiResult.Error(e.localizedMessage ?: "Network error while signing in with Google.")
+        }
+    }
+
     suspend fun signUp(
         email: String,
         password: String,
@@ -420,6 +455,13 @@ class KartRepository(
     }
 
     suspend fun signOut() {
+        val tokenToRemove = lastRegisteredFcmToken
+        if (hasSupabaseKey() && !tokenToRemove.isNullOrBlank()) {
+            runCatching {
+                supabaseApi.deleteDeviceToken("eq.$tokenToRemove")
+            }
+            lastRegisteredFcmToken = null
+        }
         runCatching {
             if (hasSupabaseKey()) supabaseApi.logout()
         }
@@ -612,6 +654,20 @@ class KartRepository(
         }
     }
 
+    suspend fun fetchUnreadNotificationsCount(userId: String): Int {
+        if (!hasSupabaseKey() || userId.isBlank()) return 0
+        return runCatching {
+            supabaseApi.getNotifications(
+                mapOf(
+                    "select" to "id",
+                    "user_id" to "eq.$userId",
+                    "is_read" to "eq.false",
+                    "limit" to "100"
+                )
+            ).body().orEmpty().size
+        }.getOrDefault(0)
+    }
+
     suspend fun markNotificationRead(notificationId: String) {
         if (!hasSupabaseKey()) return
         runCatching {
@@ -734,6 +790,14 @@ class KartRepository(
         kartWebApi.verifyPaystack(mapOf("reference" to reference))
     }
 
+    suspend fun verifySubscriptionReference(reference: String): ApiResult<Unit> = runApiAction {
+        kartWebApi.verifySubscription(mapOf("reference" to reference))
+    }
+
+    suspend fun verifyPromotionReference(reference: String): ApiResult<Unit> = runApiAction {
+        kartWebApi.verifyPromotion(mapOf("reference" to reference))
+    }
+
     suspend fun submitReview(
         productId: String?,
         sellerId: String?,
@@ -841,20 +905,28 @@ class KartRepository(
         }
     }
 
-    suspend fun fetchMessagesForConversation(conversationId: String): ApiResult<List<MessageRow>> {
+    suspend fun fetchMessagesForConversation(
+        conversationId: String,
+        afterCreatedAt: String? = null
+    ): ApiResult<List<MessageRow>> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
-            val res = supabaseApi.getMessages(
-                mapOf(
-                    "select" to "*",
-                    "conversation_id" to "eq.$conversationId",
-                    "order" to "created_at.asc",
-                    "limit" to "200"
-                )
-            )
+            val query = buildMap {
+                put("select", "*")
+                put("conversation_id", "eq.$conversationId")
+                if (!afterCreatedAt.isNullOrBlank()) {
+                    put("created_at", "gt.$afterCreatedAt")
+                }
+                put("order", "created_at.asc")
+                put("limit", "200")
+            }
+            val res = supabaseApi.getMessages(query)
             if (res.isSuccessful) {
-                runCatching { kartWebApi.markMessagesRead(mapOf("conversationId" to conversationId)) }
-                ApiResult.Success(res.body().orEmpty())
+                val rows = res.body().orEmpty()
+                if (afterCreatedAt.isNullOrBlank() || rows.isNotEmpty()) {
+                    runCatching { kartWebApi.markMessagesRead(mapOf("conversationId" to conversationId)) }
+                }
+                ApiResult.Success(rows)
             } else ApiResult.Error("Could not load messages.")
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Error loading messages.")
@@ -863,6 +935,7 @@ class KartRepository(
 
     suspend fun getOrCreateConversation(currentUserId: String, sellerId: String, productId: String?): ApiResult<String> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
+        if (currentUserId == sellerId) return ApiResult.Error("You cannot start a conversation with yourself.")
         return try {
             val existing = supabaseApi.getConversations(
                 mapOf("select" to "*", "participants" to "cs.{$currentUserId,$sellerId}")
@@ -870,9 +943,11 @@ class KartRepository(
 
             if (existing != null) return ApiResult.Success(existing.id)
 
-            val created = supabaseApi.createConversation(
-                body = mapOf("participants" to listOf(currentUserId, sellerId))
-            )
+            val createBody = buildMap<String, Any?> {
+                put("participants", listOf(currentUserId, sellerId))
+                if (!productId.isNullOrBlank()) put("product_id", productId)
+            }
+            val created = supabaseApi.createConversation(body = createBody)
             val id = created.body()?.firstOrNull()?.id
             if (id != null) ApiResult.Success(id) else ApiResult.Error("Could not start conversation.")
         } catch (e: Exception) {
@@ -901,7 +976,8 @@ class KartRepository(
     suspend fun fetchUnreadMessagesCount(): Int {
         return runCatching {
             val res = kartWebApi.getUnreadMessagesCount()
-            val num = res.body()?.get("count") as? Number
+            val body = res.body()
+            val num = (body?.get("unreadCount") ?: body?.get("count")) as? Number
             num?.toInt() ?: 0
         }.getOrDefault(0)
     }
@@ -1008,7 +1084,7 @@ class KartRepository(
                 ).body()?.firstOrNull()
             }.getOrNull()
 
-            val completedOrders = orders.filter { it.status in listOf("Paid", "Completed", "Delivered") }
+            val completedOrders = orders.filter { it.status in listOf("Completed", "Delivered") }
             val totalEarnings = completedOrders.sumOf { it.sellerPayoutAmount ?: it.totalAmount ?: 0.0 }
 
             // 7-day rolling chart matching accountBundles.js
@@ -1073,19 +1149,59 @@ class KartRepository(
 
             // Fallback to Supabase Storage direct upload
             if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
+            val storagePath = if (bucket == "profiles") {
+                val uid = sessionStore.currentSession().userId
+                if (uid.isNotBlank()) "$uid/avatar_${System.currentTimeMillis()}.$ext" else filename
+            } else filename
             val storageRes = supabaseApi.uploadToStorage(
                 bucket = bucket,
-                path = filename,
+                path = storagePath,
                 body = bytes.toRequestBody(mime.toMediaTypeOrNull())
             )
             if (storageRes.isSuccessful) {
-                val publicUrl = "${BuildConfig.SUPABASE_URL.trimEnd('/')}/storage/v1/object/public/$bucket/$filename"
+                val publicUrl = "${BuildConfig.SUPABASE_URL.trimEnd('/')}/storage/v1/object/public/$bucket/$storagePath"
                 ApiResult.Success(publicUrl)
             } else {
                 ApiResult.Error("Image upload failed (${storageRes.code()}).")
             }
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Upload failed.")
+        }
+    }
+
+    suspend fun uploadAudioFile(file: java.io.File, bucket: String = "products"): ApiResult<String> {
+        return try {
+            val bytes = file.readBytes()
+            if (bytes.isEmpty()) return ApiResult.Error("Recording was empty.")
+            val mime = "audio/mp4"
+            val filename = "voice/${UUID.randomUUID()}.m4a"
+
+            if (hasSupabaseKey()) {
+                val res = supabaseApi.uploadToStorage(
+                    bucket = bucket,
+                    path = filename,
+                    body = bytes.toRequestBody(mime.toMediaTypeOrNull())
+                )
+                if (res.isSuccessful) {
+                    val publicUrl = "${BuildConfig.SUPABASE_URL.trimEnd('/')}/storage/v1/object/public/$bucket/$filename"
+                    return ApiResult.Success(publicUrl)
+                }
+            }
+
+            val part = MultipartBody.Part.createFormData(
+                "file",
+                "voice_${UUID.randomUUID()}.m4a",
+                bytes.toRequestBody(mime.toMediaTypeOrNull())
+            )
+            val webUpload = runCatching { kartWebApi.uploadImage(part) }.getOrNull()
+            val webUrl = webUpload?.body()?.get("url")?.toString()
+            if (webUpload?.isSuccessful == true && !webUrl.isNullOrBlank()) {
+                ApiResult.Success(webUrl)
+            } else {
+                ApiResult.Error("Could not upload voice message.")
+            }
+        } catch (e: Exception) {
+            ApiResult.Error(e.localizedMessage ?: "Voice upload failed.")
         }
     }
 
@@ -1133,22 +1249,22 @@ class KartRepository(
         category: String,
         condition: String,
         campus: String,
-        status: String,
+        stock: Int? = null,
         imageUrls: List<String>
     ): ApiResult<Product> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
-            val payload = mapOf(
-                "title" to title.trim(),
-                "description" to description.trim(),
-                "price" to price,
-                "category" to category,
-                "condition" to condition,
-                "campus" to campus,
-                "status" to status,
-                "image_url" to imageUrls.firstOrNull(),
-                "images" to imageUrls
-            )
+            val payload = buildMap<String, Any?> {
+                put("title", title.trim())
+                put("description", description.trim())
+                put("price", price)
+                put("category", category)
+                put("condition", condition)
+                put("campus", campus)
+                if (stock != null) put("stock_quantity", stock.coerceAtLeast(0))
+                put("image_url", imageUrls.firstOrNull())
+                put("images", imageUrls)
+            }
             val res = supabaseApi.updateProduct(idFilter = "eq.$productId", body = payload)
             val updated = res.body()?.firstOrNull()
             if (res.isSuccessful && updated != null) ApiResult.Success(updated)
@@ -1231,16 +1347,52 @@ class KartRepository(
         kartWebApi.verifyPhoneOtp(mapOf("phone" to phone, "otp" to otp))
     }
 
-    suspend fun submitKycVerification(idImageUrl: String, selfieImageUrl: String, studentIdNumber: String): ApiResult<Unit> =
-        runApiAction {
+    suspend fun submitKycVerification(
+        idImageUrl: String,
+        selfieImageUrl: String,
+        studentIdNumber: String,
+        fullName: String = "",
+        campus: String = ""
+    ): ApiResult<Unit> {
+        val webRes = runApiAction {
             kartWebApi.submitVerificationRequest(
                 mapOf(
                     "id_image_url" to idImageUrl,
+                    "idImageUrl" to idImageUrl,
+                    "idPhotoUrl" to idImageUrl,
+                    "id_photo_url" to idImageUrl,
+                    "idCardUrl" to idImageUrl,
+                    "id_card_url" to idImageUrl,
+                    "idFrontUrl" to idImageUrl,
+                    "id_front_url" to idImageUrl,
+                    "documentUrl" to idImageUrl,
+                    "document_url" to idImageUrl,
+                    "studentIdUrl" to idImageUrl,
+                    "student_id_url" to idImageUrl,
+                    "idUrl" to idImageUrl,
                     "selfie_image_url" to selfieImageUrl,
-                    "student_id_number" to studentIdNumber
+                    "selfieImageUrl" to selfieImageUrl,
+                    "selfiePhotoUrl" to selfieImageUrl,
+                    "selfie_photo_url" to selfieImageUrl,
+                    "selfieUrl" to selfieImageUrl,
+                    "selfie_url" to selfieImageUrl,
+                    "faceImageUrl" to selfieImageUrl,
+                    "face_image_url" to selfieImageUrl,
+                    "faceUrl" to selfieImageUrl,
+                    "student_id_number" to studentIdNumber,
+                    "studentIdNumber" to studentIdNumber,
+                    "studentId" to studentIdNumber,
+                    "student_id" to studentIdNumber,
+                    "idNumber" to studentIdNumber,
+                    "id_number" to studentIdNumber,
+                    "fullName" to fullName.ifBlank { "Kart User" },
+                    "full_name" to fullName.ifBlank { "Kart User" },
+                    "campus" to campus.ifBlank { "University of Ghana" }
                 )
             )
         }
+        return webRes
+    }
 
     suspend fun requestAccountDeletion(reason: String): ApiResult<Unit> = runApiAction {
         kartWebApi.requestAccountDeletion(mapOf("reason" to reason))
@@ -1256,6 +1408,29 @@ class KartRepository(
             }
             rows.map { it.name }.ifEmpty { KartGhanaCampuses }
         }.getOrDefault(KartGhanaCampuses)
+    }
+
+    // --- Push Notifications (FCM Device Tokens) ---
+    suspend fun registerFcmToken(userId: String, token: String) {
+        if (!hasSupabaseKey() || userId.isBlank() || token.isBlank()) return
+        lastRegisteredFcmToken = token
+        runCatching {
+            val rpcRes = supabaseApi.upsertDeviceTokenRpc(
+                body = mapOf(
+                    "p_fcm_token" to token,
+                    "p_platform" to "android"
+                )
+            )
+            if (!rpcRes.isSuccessful) {
+                supabaseApi.upsertDeviceToken(
+                    body = mapOf(
+                        "user_id" to userId,
+                        "fcm_token" to token,
+                        "platform" to "android"
+                    )
+                )
+            }
+        }
     }
 
     // --- Admin Console ---

@@ -41,6 +41,12 @@ interface SupabaseApi {
     ): Response<AuthResponse>
 
     @POST("auth/v1/token")
+    suspend fun signInWithIdToken(
+        @Query("grant_type") grantType: String = "id_token",
+        @Body body: Map<String, String>
+    ): Response<AuthResponse>
+
+    @POST("auth/v1/token")
     suspend fun refreshToken(
         @Query("grant_type") grantType: String = "refresh_token",
         @Body body: Map<String, String>
@@ -170,6 +176,24 @@ interface SupabaseApi {
 
     @GET("rest/v1/refund_requests")
     suspend fun getRefundRequests(@QueryMap params: Map<String, String>): Response<List<RefundRequestRow>>
+
+    // --- Device Push Tokens (FCM) ---
+    @POST("rest/v1/rpc/upsert_device_token")
+    suspend fun upsertDeviceTokenRpc(
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<Unit>
+
+    @POST("rest/v1/device_tokens")
+    suspend fun upsertDeviceToken(
+        @Header("Prefer") prefer: String = "resolution=merge-duplicates,return=minimal",
+        @Query("on_conflict") onConflict: String = "fcm_token",
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<Unit>
+
+    @DELETE("rest/v1/device_tokens")
+    suspend fun deleteDeviceToken(
+        @Query("fcm_token") fcmTokenFilter: String
+    ): Response<Unit>
 
     // --- Storage Upload ---
     @POST("storage/v1/object/{bucket}/{path}")

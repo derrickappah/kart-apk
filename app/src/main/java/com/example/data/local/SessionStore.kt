@@ -29,8 +29,8 @@ class SessionStore(private val context: Context) {
 
     val sessionFlow: Flow<UserSession> = context.kartDataStore.data.map { prefs ->
         UserSession(
-            accessToken = prefs[Keys.ACCESS_TOKEN].orEmpty(),
-            refreshToken = prefs[Keys.REFRESH_TOKEN].orEmpty(),
+            accessToken = TokenCipher.decrypt(prefs[Keys.ACCESS_TOKEN].orEmpty()),
+            refreshToken = TokenCipher.decrypt(prefs[Keys.REFRESH_TOKEN].orEmpty()),
             userId = prefs[Keys.USER_ID].orEmpty(),
             email = prefs[Keys.USER_EMAIL].orEmpty()
         )
@@ -60,8 +60,8 @@ class SessionStore(private val context: Context) {
 
     suspend fun saveSession(session: UserSession) {
         context.kartDataStore.edit { prefs ->
-            prefs[Keys.ACCESS_TOKEN] = session.accessToken
-            prefs[Keys.REFRESH_TOKEN] = session.refreshToken
+            prefs[Keys.ACCESS_TOKEN] = TokenCipher.encrypt(session.accessToken)
+            prefs[Keys.REFRESH_TOKEN] = TokenCipher.encrypt(session.refreshToken)
             prefs[Keys.USER_ID] = session.userId
             prefs[Keys.USER_EMAIL] = session.email
         }
