@@ -21,6 +21,7 @@ import com.example.domain.model.Profile
 import com.example.domain.model.RefundRequestRow
 import com.example.domain.model.ReportRow
 import com.example.domain.model.Review
+import com.example.domain.model.SellerSnippet
 import com.example.domain.model.SubscriptionPlan
 import com.example.domain.model.UserSession
 import com.example.domain.model.UserSubscription
@@ -222,7 +223,7 @@ class KartRepository(
             if (hasSupabaseKey()) {
                 val res = supabaseApi.getProducts(
                     mapOf(
-                        "select" to "*,seller:profiles(id,display_name,username,avatar_url,is_verified,average_rating,reviews_count,streak_count,campus)",
+                        "select" to "*,seller:profiles(id,display_name,username,avatar_url,is_verified,average_rating,streak_count,campus)",
                         "id" to "eq.$productId",
                         "limit" to "1"
                     )
@@ -256,14 +257,15 @@ class KartRepository(
                 }.getOrNull()
 
                 reviews = runCatching {
-                    supabaseApi.getReviews(
+                    val rawReviews = supabaseApi.getReviews(
                         mapOf(
-                            "select" to "*,reviewer:profiles!reviews_reviewer_id_fkey(id,display_name,avatar_url,is_verified)",
+                            "select" to "*",
                             "or" to "(product_id.eq.$productId,seller_id.eq.$sellerId)",
                             "order" to "created_at.desc",
                             "limit" to "20"
                         )
                     ).body().orEmpty()
+                    enrichReviewsWithProfiles(rawReviews)
                 }.getOrDefault(emptyList())
 
                 val follows = runCatching {
@@ -461,13 +463,14 @@ class KartRepository(
             }.getOrDefault(emptyList())
 
             val reviews = runCatching {
-                supabaseApi.getReviews(
+                val rawReviews = supabaseApi.getReviews(
                     mapOf(
-                        "select" to "*,reviewer:profiles!reviews_reviewer_id_fkey(id,display_name,avatar_url,is_verified)",
+                        "select" to "*",
                         "seller_id" to "eq.$targetUserId",
                         "order" to "created_at.desc"
                     )
                 ).body().orEmpty()
+                enrichReviewsWithProfiles(rawReviews)
             }.getOrDefault(emptyList())
 
             val walletBalance = if (targetUserId == currentUserId) {
@@ -534,9 +537,44 @@ class KartRepository(
         }
     }
 
+    private suspend fun enrichReviewsWithProfiles(reviews: List<Review>): List<Review> {
+        if (reviews.isEmpty() || !hasSupabaseKey()) return reviews
+        val reviewerIds = reviews.mapNotNull { it.buyerId ?: it.reviewerId }.filter { it.isNotBlank() }.distinct()
+        if (reviewerIds.isEmpty()) return reviews
+        val profilesById = runCatching {
+            supabaseApi.getProfiles(
+                mapOf(
+                    "select" to "id,display_name,username,avatar_url,is_verified",
+                    "id" to "in.(${reviewerIds.joinToString(",")})"
+                )
+            ).body().orEmpty().associateBy { it.id }
+        }.getOrDefault(emptyMap())
+        return reviews.map { rev ->
+            val uid = rev.buyerId ?: rev.reviewerId
+            val p = uid?.let { profilesById[it] }
+            if (p != null) {
+                rev.copy(
+                    reviewer = SellerSnippet(
+                        id = p.id,
+                        displayName = p.displayName,
+                        username = p.username,
+                        avatarUrl = p.avatarUrl,
+                        isVerified = p.isVerified
+                    )
+                )
+            } else rev
+        }
+    }
+
     suspend fun toggleFollow(targetUserId: String): ApiResult<Boolean> {
         return try {
-            val res = kartWebApi.toggleFollow(mapOf("targetUserId" to targetUserId))
+            val res = kartWebApi.toggleFollow(
+                mapOf(
+                    "followingId" to targetUserId,
+                    "following_id" to targetUserId,
+                    "targetUserId" to targetUserId
+                )
+            )
             if (res.isSuccessful) {
                 val following = res.body()?.get("following") as? Boolean ?: true
                 ApiResult.Success(following)
@@ -715,9 +753,23 @@ class KartRepository(
 
     suspend fun submitReport(targetType: String, targetId: String, reason: String, details: String): ApiResult<Unit> =
         runApiAction {
-            kartWebApi.createReport(
-                mapOf("targetType" to targetType, "targetId" to targetId, "reason" to reason, "details" to details)
-            )
+            val body = buildMap<String, Any> {
+                put("target_type", targetType)
+                put("targetType", targetType)
+                put("target_id", targetId)
+                put("targetId", targetId)
+                if (targetType == "product") {
+                    put("productId", targetId)
+                    put("product_id", targetId)
+                } else {
+                    put("reportedUserId", targetId)
+                    put("reported_user_id", targetId)
+                }
+                put("reason", reason)
+                put("description", details)
+                put("details", details)
+            }
+            kartWebApi.createReport(body)
         }
 
     // --- Messaging ---
@@ -814,15 +866,12 @@ class KartRepository(
         return try {
             val existing = supabaseApi.getConversations(
                 mapOf("select" to "*", "participants" to "cs.{$currentUserId,$sellerId}")
-            ).body().orEmpty().firstOrNull { it.productId == productId || productId == null }
+            ).body().orEmpty().firstOrNull()
 
             if (existing != null) return ApiResult.Success(existing.id)
 
             val created = supabaseApi.createConversation(
-                body = buildMap {
-                    put("participants", listOf(currentUserId, sellerId))
-                    if (!productId.isNullOrBlank()) put("product_id", productId)
-                }
+                body = mapOf("participants" to listOf(currentUserId, sellerId))
             )
             val id = created.body()?.firstOrNull()?.id
             if (id != null) ApiResult.Success(id) else ApiResult.Error("Could not start conversation.")
@@ -1258,7 +1307,13 @@ class KartRepository(
         return try {
             val res = call()
             if (res.isSuccessful) ApiResult.Success(Unit)
-            else ApiResult.Error(res.body()?.get("error")?.toString() ?: "Action failed (${res.code()}).")
+            else {
+                val errBody = runCatching { res.errorBody()?.string() }.getOrNull()
+                val parsed = errBody?.let {
+                    runCatching { org.json.JSONObject(it).optString("error").ifBlank { null } }.getOrNull()
+                }
+                ApiResult.Error(parsed ?: res.body()?.get("error")?.toString() ?: "Action failed (${res.code()}).")
+            }
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Request failed.")
         }

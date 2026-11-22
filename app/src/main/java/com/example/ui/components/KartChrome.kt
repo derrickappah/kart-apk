@@ -645,103 +645,61 @@ fun KartConditionSelector(
     modifier: Modifier = Modifier
 ) {
     val tokens = KartThemeTokens.colors
+    val containerShape = RoundedCornerShape(14.dp)
+
     Column(
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(containerShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, tokens.cardBorder, containerShape)
     ) {
-        KartConditionOptions.forEach { option ->
+        KartConditionOptions.forEachIndexed { index, option ->
             val selected = selectedConditions.any { it.equals(option.name, ignoreCase = true) }
-            val interactionSource = remember { MutableInteractionSource() }
-            val isPressed by interactionSource.collectIsPressedAsState()
-            val cardScale by animateFloatAsState(
-                targetValue = if (isPressed) 0.98f else 1f,
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                label = "conditionCardScale"
-            )
-            val containerBg = if (selected) {
-                KartPrimary.copy(alpha = if (tokens.isDark) 0.15f else 0.10f)
-            } else {
-                tokens.conditionCardBg
-            }
-            val borderColor = if (selected) KartPrimary else tokens.cardBorder
-            val borderWidth = if (selected) 1.5.dp else 1.dp
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 56.dp)
-                    .graphicsLayer {
-                        scaleX = cardScale
-                        scaleY = cardScale
-                    }
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(containerBg)
-                    .border(borderWidth, borderColor, RoundedCornerShape(16.dp))
-                    .clickable(
-                        interactionSource = interactionSource,
-                        indication = LocalIndication.current,
-                        onClick = { onToggleCondition(option.name) }
+                    .background(
+                        if (selected) tokens.textPrimary.copy(alpha = 0.04f)
+                        else Color.Transparent
                     )
-                    .padding(12.dp)
+                    .clickable { onToggleCondition(option.name) }
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
                     .testTag("condition_option_${option.name.lowercase().replace(" ", "_")}")
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (selected) KartPrimary else tokens.conditionIconBoxBg)
-                    ) {
-                        Icon(
-                            imageVector = KartLucideIcons.conditionIcon(option.name),
-                            contentDescription = null,
-                            tint = if (selected) Color.White else tokens.textSecondary,
-                            modifier = Modifier.size(17.dp)
-                        )
-                    }
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = option.name,
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            color = if (selected) {
-                                if (tokens.isDark) tokens.primaryLight else KartPrimary
-                            } else {
-                                tokens.textPrimary
-                            }
-                        )
-                        Text(
-                            text = option.description,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium
-                            ),
-                            color = tokens.textMuted
-                        )
-                    }
+                    Text(
+                        text = option.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tokens.textPrimary
+                    )
+                    Text(
+                        text = option.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = tokens.textSecondary
+                    )
                 }
 
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(12.dp))
 
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .size(20.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (selected) KartPrimary else tokens.conditionIconBoxBg)
+                        .clip(CircleShape)
+                        .background(if (selected) KartPrimary else Color.Transparent)
                         .border(
-                            width = 2.dp,
-                            color = if (selected) KartPrimary else tokens.subtleDivider,
-                            shape = RoundedCornerShape(6.dp)
+                            width = 1.5.dp,
+                            color = if (selected) KartPrimary else tokens.cardBorder,
+                            shape = CircleShape
                         )
                 ) {
                     if (selected) {
@@ -749,10 +707,18 @@ fun KartConditionSelector(
                             imageVector = KartLucideIcons.Check,
                             contentDescription = null,
                             tint = Color.White,
-                            modifier = Modifier.size(13.dp)
+                            modifier = Modifier.size(12.dp)
                         )
                     }
                 }
+            }
+
+            if (index < KartConditionOptions.lastIndex) {
+                HorizontalDivider(
+                    color = tokens.cardBorder,
+                    thickness = 1.dp,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
             }
         }
     }

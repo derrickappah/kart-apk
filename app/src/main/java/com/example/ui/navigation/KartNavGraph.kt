@@ -120,7 +120,13 @@ fun KartAppRoot(
             when {
                 !refreshToken.isNullOrBlank() -> {
                     sessionViewModel.handleDeepLinkRefreshToken(refreshToken) {
-                        navController.navigate("home") { popUpTo(0) }
+                        navController.navigate("home") {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                inclusive = true
+                                saveState = false
+                            }
+                            launchSingleTop = true
+                        }
                     }
                 }
                 (raw.contains("auth-tokens") || deepLinkUri.path == "/login") && !authErrorParam.isNullOrBlank() -> {
@@ -192,6 +198,19 @@ fun KartAppRoot(
             return
         }
         if (baseRoute == route && route != "marketplace") return
+        if (route == "home") {
+            val popped = navController.popBackStack("home", inclusive = false)
+            if (!popped) {
+                navController.navigate("home") {
+                    popUpTo(navController.graph.findStartDestination().id) {
+                        inclusive = true
+                        saveState = false
+                    }
+                    launchSingleTop = true
+                }
+            }
+            return
+        }
         navController.navigate(route) {
             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
             launchSingleTop = true
@@ -363,8 +382,20 @@ fun KartAppRoot(
                                 SignUpScreen(
                                     sessionViewModel = sessionViewModel,
                                     onSignedUp = { immediate ->
-                                        if (immediate) navController.navigate("home") { popUpTo(0) }
-                                        else navController.navigate("login") { popUpTo("signup") { inclusive = true } }
+                                        if (immediate) {
+                                            navController.navigate("home") {
+                                                popUpTo(navController.graph.findStartDestination().id) {
+                                                    inclusive = true
+                                                    saveState = false
+                                                }
+                                                launchSingleTop = true
+                                            }
+                                        } else {
+                                            navController.navigate("login") {
+                                                popUpTo("signup") { inclusive = true }
+                                                launchSingleTop = true
+                                            }
+                                        }
                                     },
                                     onNavigateLogin = { navController.popBackStack() }
                                 )

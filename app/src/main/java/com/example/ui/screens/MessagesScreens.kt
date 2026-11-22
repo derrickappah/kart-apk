@@ -117,10 +117,8 @@ fun MessagesInboxScreen(
             .background(MaterialTheme.colorScheme.background)
     ) {
         Column(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
-            Text("Messages", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
             KartSearchBar(
                 query = search,
                 onQueryChange = { search = it },
@@ -195,6 +193,7 @@ private fun ConversationRowItem(
                     text = conversation.otherUser.resolvedName,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
+                    color = tokens.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -299,7 +298,11 @@ fun ChatThreadScreen(
             .imePadding()
     ) {
         // Chat Header
-        Surface(color = MaterialTheme.colorScheme.background, shadowElevation = 2.dp) {
+        Surface(
+            color = MaterialTheme.colorScheme.background,
+            contentColor = tokens.textPrimary,
+            shadowElevation = 2.dp
+        ) {
             Column(modifier = Modifier.statusBarsPadding()) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -309,7 +312,11 @@ fun ChatThreadScreen(
                         .padding(horizontal = 8.dp)
                 ) {
                     IconButton(onClick = onBack) {
-                        Icon(KartLucideIcons.ArrowLeft, contentDescription = "Back")
+                        Icon(
+                            KartLucideIcons.ArrowLeft,
+                            contentDescription = "Back",
+                            tint = tokens.textPrimary
+                        )
                     }
                     UserAvatar(
                         avatarUrl = conv?.otherUser?.avatarUrl,
@@ -323,6 +330,7 @@ fun ChatThreadScreen(
                             text = conv?.otherUser?.resolvedName ?: "Chat",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
+                            color = tokens.textPrimary,
                             maxLines = 1
                         )
                         if (!conv?.otherUser?.campus.isNullOrBlank()) {
@@ -352,7 +360,12 @@ fun ChatThreadScreen(
                         )
                         Spacer(Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(conv.product.title, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                            Text(
+                                conv.product.title,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = tokens.textPrimary,
+                                maxLines = 1
+                            )
                             Text(
                                 KartFormatters.formatCedis(conv.product.price),
                                 style = MaterialTheme.typography.labelMedium,
@@ -384,21 +397,20 @@ fun ChatThreadScreen(
                         horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
                         modifier = Modifier.widthIn(max = 285.dp)
                     ) {
+                        val bubbleShape = RoundedCornerShape(
+                            topStart = 18.dp,
+                            topEnd = 18.dp,
+                            bottomStart = if (isMine) 18.dp else 4.dp,
+                            bottomEnd = if (isMine) 4.dp else 18.dp
+                        )
                         Box(
                             modifier = Modifier
-                                .clip(
-                                    RoundedCornerShape(
-                                        topStart = 18.dp,
-                                        topEnd = 18.dp,
-                                        bottomStart = if (isMine) 18.dp else 4.dp,
-                                        bottomEnd = if (isMine) 4.dp else 18.dp
-                                    )
-                                )
-                                .background(if (isMine) KartPrimary else MaterialTheme.colorScheme.background)
+                                .clip(bubbleShape)
+                                .background(if (isMine) KartPrimary else MaterialTheme.colorScheme.surface)
                                 .border(
                                     width = if (isMine) 0.dp else 1.dp,
                                     color = if (isMine) Color.Transparent else tokens.cardBorder,
-                                    shape = RoundedCornerShape(18.dp)
+                                    shape = bubbleShape
                                 )
                                 .padding(if (imageUrl != null) 4.dp else 12.dp)
                         ) {
@@ -450,10 +462,21 @@ fun ChatThreadScreen(
                 OutlinedTextField(
                     value = messageInput,
                     onValueChange = { messageInput = it },
-                    placeholder = { Text("Type a message...", style = MaterialTheme.typography.bodyMedium) },
+                    placeholder = {
+                        Text(
+                            "Type a message...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = tokens.textMuted
+                        )
+                    },
                     shape = RoundedCornerShape(24.dp),
                     maxLines = 4,
                     colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = tokens.textPrimary,
+                        unfocusedTextColor = tokens.textPrimary,
+                        cursorColor = KartPrimary,
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
                         focusedBorderColor = KartPrimary,
                         unfocusedBorderColor = tokens.subtleDivider
                     ),

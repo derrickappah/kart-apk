@@ -282,9 +282,12 @@ fun ProductDetailScreen(
 
                     // 5: Buyer Reviews Section
                     item(key = "reviews_section") {
+                        val hasUserReview = currentUserId != null &&
+                            bundle.reviews.any { (it.buyerId ?: it.reviewerId) == currentUserId }
                         ProductReviewsSection(
                             reviews = bundle.reviews,
                             isOwner = isOwner,
+                            hasUserReview = hasUserReview,
                             onWriteReview = {
                                 if (currentUserId == null) onRequireAuth()
                                 else showReviewDialog = true
@@ -1113,6 +1116,7 @@ private fun ProductSellerSection(
 private fun ProductReviewsSection(
     reviews: List<Review>,
     isOwner: Boolean,
+    hasUserReview: Boolean,
     onWriteReview: () -> Unit
 ) {
     val tokens = KartThemeTokens.colors
@@ -1155,7 +1159,7 @@ private fun ProductReviewsSection(
                         .testTag("product_write_review_btn")
                 ) {
                     Text(
-                        text = "Write a review",
+                        text = if (hasUserReview) "Edit your review" else "Write a review",
                         style = MaterialTheme.typography.labelLarge.copy(
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold

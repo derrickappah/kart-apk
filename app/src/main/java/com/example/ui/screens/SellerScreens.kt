@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -277,7 +280,6 @@ fun CreateEditListingScreen(
     var title by remember(editProduct) { mutableStateOf(editProduct?.title.orEmpty()) }
     var description by remember(editProduct) { mutableStateOf(editProduct?.description.orEmpty()) }
     var price by remember(editProduct) { mutableStateOf(editProduct?.price?.takeIf { it > 0 }?.toString().orEmpty()) }
-    var stock by remember(editProduct) { mutableStateOf((editProduct?.stockQuantity ?: 1).toString()) }
     var category by remember(editProduct) { mutableStateOf(editProduct?.category ?: KartCategories.first().name) }
     var condition by remember(editProduct) {
         mutableStateOf(conditionOptionFor(editProduct?.condition)?.name ?: "Like New")
@@ -352,78 +354,196 @@ fun CreateEditListingScreen(
         return
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        KartSubScreenTopBar(
-            title = if (editProduct != null) "Edit Listing" else "Sell an Item",
-            onBack = onBack
-        )
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            KartSubScreenTopBar(
+                title = if (editProduct != null) "Edit listing" else "Sell an item",
+                onBack = onBack
+            )
+
+        val canPublish = title.trim().length >= 3 && (price.toDoubleOrNull() ?: 0.0) > 0
 
         LazyColumn(
-            contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            modifier = Modifier.fillMaxSize()
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
         ) {
-            // Multi-Photo Picker
+            // Photos Section
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Photos (up to 6)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        item {
-                            Box(
-                                contentAlignment = Alignment.Center,
-                                modifier = Modifier
-                                    .size(96.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .border(1.5.dp, KartPrimary, RoundedCornerShape(14.dp))
-                                    .background(KartPrimary.copy(alpha = 0.08f))
-                                    .clickable {
-                                        if (totalPhotoCount >= 6) {
-                                            onShowMessage("You can add up to 6 photos per listing.")
-                                        } else {
-                                            showPhotoSourceSheet = true
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "Photos",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = tokens.textPrimary
+                            )
+                            Text(
+                                text = "First photo is your cover",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = tokens.textSecondary
+                            )
+                        }
+                        Text(
+                            text = "$totalPhotoCount / 6",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = tokens.textSecondary
+                        )
+                    }
+
+                    if (totalPhotoCount == 0) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(120.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
+                                .clickable { showPhotoSourceSheet = true }
+                                .testTag("create_listing_add_photo")
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = KartLucideIcons.Camera,
+                                    contentDescription = "Add photos",
+                                    tint = tokens.textSecondary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "Add photos",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = tokens.textPrimary
+                                )
+                                Text(
+                                    text = "Camera or photo library",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = tokens.textSecondary
+                                )
+                            }
+                        }
+                    } else {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            items(existingUrls.size) { index ->
+                                val url = existingUrls[index]
+                                Box(
+                                    modifier = Modifier
+                                        .size(92.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
+                                ) {
+                                    AsyncImage(
+                                        model = url,
+                                        contentDescription = "Listing photo",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    if (index == 0) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier
+                                                .align(Alignment.BottomCenter)
+                                                .fillMaxWidth()
+                                                .background(Color.Black.copy(alpha = 0.56f))
+                                                .padding(vertical = 2.dp)
+                                        ) {
+                                            Text("Cover", style = MaterialTheme.typography.labelSmall, color = Color.White)
                                         }
                                     }
-                                    .testTag("create_listing_add_photo")
-                            ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(KartLucideIcons.ImagePlus, contentDescription = "Add photos", tint = KartPrimary)
-                                    Text("Add Photos", style = MaterialTheme.typography.labelSmall, color = KartPrimary)
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(5.dp)
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.Black.copy(alpha = 0.65f))
+                                            .clickable { existingUrls = existingUrls - url }
+                                    ) {
+                                        Icon(KartLucideIcons.X, contentDescription = "Remove", tint = Color.White, modifier = Modifier.size(12.dp))
+                                    }
                                 }
                             }
-                        }
-                        items(existingUrls) { url ->
-                            Box(modifier = Modifier.size(96.dp)) {
-                                AsyncImage(
-                                    model = url,
-                                    contentDescription = "Listing photo",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp))
-                                )
-                                IconButton(
-                                    onClick = { existingUrls = existingUrls - url },
-                                    modifier = Modifier.align(Alignment.TopEnd).size(26.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.6f))
+                            items(pickedUris.size) { index ->
+                                val uri = pickedUris[index]
+                                val isCover = existingUrls.isEmpty() && index == 0
+                                Box(
+                                    modifier = Modifier
+                                        .size(92.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
                                 ) {
-                                    Icon(KartLucideIcons.X, contentDescription = "Remove", tint = Color.White, modifier = Modifier.size(14.dp))
+                                    AsyncImage(
+                                        model = uri,
+                                        contentDescription = "Selected photo",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    if (isCover) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier
+                                                .align(Alignment.BottomCenter)
+                                                .fillMaxWidth()
+                                                .background(Color.Black.copy(alpha = 0.56f))
+                                                .padding(vertical = 2.dp)
+                                        ) {
+                                            Text("Cover", style = MaterialTheme.typography.labelSmall, color = Color.White)
+                                        }
+                                    }
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(5.dp)
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.Black.copy(alpha = 0.65f))
+                                            .clickable { pickedUris = pickedUris - uri }
+                                    ) {
+                                        Icon(KartLucideIcons.X, contentDescription = "Remove", tint = Color.White, modifier = Modifier.size(12.dp))
+                                    }
                                 }
                             }
-                        }
-                        items(pickedUris) { uri ->
-                            Box(modifier = Modifier.size(96.dp)) {
-                                AsyncImage(
-                                    model = uri,
-                                    contentDescription = "Selected photo",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp))
-                                )
-                                IconButton(
-                                    onClick = { pickedUris = pickedUris - uri },
-                                    modifier = Modifier.align(Alignment.TopEnd).size(26.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.6f))
-                                ) {
-                                    Icon(KartLucideIcons.X, contentDescription = "Remove", tint = Color.White, modifier = Modifier.size(14.dp))
+                            if (totalPhotoCount < 6) {
+                                item {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .size(92.dp)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                            .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
+                                            .clickable { showPhotoSourceSheet = true }
+                                            .testTag("create_listing_add_photo")
+                                    ) {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Icon(KartLucideIcons.Plus, contentDescription = "Add photos", tint = KartPrimary, modifier = Modifier.size(20.dp))
+                                            Text("Add", style = MaterialTheme.typography.labelSmall, color = tokens.textSecondary)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -431,52 +551,63 @@ fun CreateEditListingScreen(
                 }
             }
 
+            // Basics: Title, Price, Description (no redundant parent heading)
             item {
-                KartTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    label = "Title",
-                    placeholder = "e.g. MacBook Air M2 256GB (Barely Used)",
-                    testTag = "listing_title_input"
-                )
-            }
-
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    KartTextField(
+                        value = title,
+                        onValueChange = { title = it },
+                        label = "Title",
+                        placeholder = "MacBook Air M2 256GB",
+                        testTag = "listing_title_input"
+                    )
                     KartTextField(
                         value = price,
                         onValueChange = { price = it.filter { c -> c.isDigit() || c == '.' } },
                         label = "Price (₵ GHS)",
                         placeholder = "450",
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1.4f),
+                        modifier = Modifier.fillMaxWidth(),
                         testTag = "listing_price_input"
                     )
                     KartTextField(
-                        value = stock,
-                        onValueChange = { stock = it.filter(Char::isDigit).take(3) },
-                        label = "Stock",
-                        placeholder = "1",
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.weight(0.8f)
+                        value = description,
+                        onValueChange = { description = it },
+                        label = "Description",
+                        placeholder = "Condition, specs, or meetup spot",
+                        singleLine = false,
+                        maxLines = 5,
+                        testTag = "listing_description_input"
                     )
                 }
             }
 
+            // Category Section (compact horizontal row instead of tall pill wall)
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Category", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        KartCategories.forEach { cat ->
+                    Text(
+                        text = "Category",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tokens.textPrimary
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(KartCategories) { cat ->
                             KartChip(label = cat.name, selected = category == cat.name, onClick = { category = cat.name })
                         }
                     }
                 }
             }
 
+            // Condition Section
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Item Condition", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Condition",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tokens.textPrimary
+                    )
                     KartConditionSelector(
                         selectedConditions = setOf(condition),
                         onToggleCondition = { selected -> condition = selected }
@@ -484,34 +615,42 @@ fun CreateEditListingScreen(
                 }
             }
 
+            // Campus Section
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Campus Location", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        KartGhanaCampuses.take(8).forEach { c ->
+                    Text(
+                        text = "Campus",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tokens.textPrimary
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(KartGhanaCampuses.take(8)) { c ->
                             KartChip(label = c, selected = campus == c, onClick = { campus = c })
                         }
                     }
                 }
             }
+        }
 
-            item {
-                KartTextField(
-                    value = description,
-                    onValueChange = { description = it },
-                    label = "Description",
-                    placeholder = "Mention specs, flaws, meetup spot on campus...",
-                    singleLine = false,
-                    maxLines = 5,
-                    testTag = "listing_description_input"
-                )
-            }
-
-            item {
+        // Sticky Bottom Publish Bar
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background)
+                .imePadding()
+                .navigationBarsPadding()
+        ) {
+            HorizontalDivider(color = tokens.cardBorder)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
                 KartPrimaryButton(
-                    text = if (editProduct != null) "Save Changes" else "Publish Listing",
+                    text = if (editProduct != null) "Save changes" else "Publish listing",
                     loading = state.actionLoading,
-                    enabled = title.trim().length >= 3 && (price.toDoubleOrNull() ?: 0.0) > 0,
+                    enabled = canPublish,
                     onClick = {
                         viewModel.publishListing(
                             sellerId = sellerId,
@@ -522,7 +661,7 @@ fun CreateEditListingScreen(
                             category = category,
                             condition = condition,
                             campus = campus,
-                            stock = stock.toIntOrNull() ?: 1,
+                            stock = editProduct?.stockQuantity ?: 1,
                             existingUrls = existingUrls,
                             newImageUris = pickedUris,
                             resolver = context.contentResolver,
@@ -580,6 +719,7 @@ fun CreateEditListingScreen(
         } else {
             showInAppCamera = false
         }
+    }
     }
 }
 

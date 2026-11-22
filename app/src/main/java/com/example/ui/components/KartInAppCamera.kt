@@ -10,12 +10,10 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -61,6 +59,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +70,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -78,6 +78,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -86,8 +87,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.example.ui.theme.KartDanger
@@ -308,7 +311,10 @@ fun KartInAppCameraDialog(
     var isCameraReady by remember { mutableStateOf(false) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var isCapturing by remember { mutableStateOf(false) }
-    var flashVisible by remember { mutableStateOf(false) }
+    var flashTick by remember { mutableIntStateOf(0) }
+    var flipCount by remember { mutableIntStateOf(0) }
+    val shutterFlashAlpha = remember { Animatable(0f) }
+    val uiEaseOut = remember { CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
 
     val previewView = remember {
         PreviewView(context).apply {
@@ -323,11 +329,14 @@ fun KartInAppCameraDialog(
     }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
 
-    // Trigger 120ms white shutter flash
-    LaunchedEffect(flashVisible) {
-        if (flashVisible) {
-            delay(120L)
-            flashVisible = false
+    // Interruptible shutter flash scoped to the viewfinder well: instant peak, 180ms ease-out decay
+    LaunchedEffect(flashTick) {
+        if (flashTick > 0) {
+            shutterFlashAlpha.snapTo(0.85f)
+            shutterFlashAlpha.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(durationMillis = 180, easing = uiEaseOut)
+            )
         }
     }
 
@@ -385,7 +394,7 @@ fun KartInAppCameraDialog(
         val capture = imageCapture ?: return
         if (!isCameraReady || isCapturing || capturedUris.size >= maxPhotos) return
         isCapturing = true
-        flashVisible = true
+        flashTick++
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
 
         val photoDir = File(context.cacheDir, "camera_photos").apply { mkdirs() }
@@ -415,82 +424,59 @@ fun KartInAppCameraDialog(
         )
     }
 
-    val pulseTransition = rememberInfiniteTransition(label = "cameraLiveDot")
-    val liveDotAlpha by pulseTransition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "cameraLiveDotAlpha"
-    )
-    val flashAlpha by animateFloatAsState(
-        targetValue = if (flashVisible) 0.92f else 0f,
-        animationSpec = tween(durationMillis = 100),
-        label = "cameraFlashAlpha"
+    val flipRotation by animateFloatAsState(
+        targetValue = flipCount * 180f,
+        animationSpec = tween(durationMillis = 260, easing = uiEaseOut),
+        label = "cameraFlipRotation"
     )
     val isAtLimit = capturedUris.size >= maxPhotos
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false
-        )
-    ) {
-        BackHandler(onBack = onDismiss)
+    BackHandler(onBack = onDismiss)
 
-        Box(
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 14.dp, vertical = 12.dp)
-            ) {
-                // Top Bar: "X / N Photos" status pill + animated "Done (X)" button
+                // Quiet, unslopped Top Bar: title + subtle count on left, flat primary action on right
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 2.dp)
+                        .height(36.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .border(1.dp, tokens.cardBorder, CircleShape)
-                            .padding(horizontal = 14.dp, vertical = 7.dp)
-                            .testTag("camera_photo_counter")
+                        modifier = Modifier.testTag("camera_photo_counter")
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .alpha(liveDotAlpha)
-                                .clip(CircleShape)
-                                .background(KartPrimary)
+                        Text(
+                            text = "Take photo",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = tokens.textPrimary
                         )
                         Text(
-                            text = "${capturedUris.size} / $maxPhotos Photos",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Black,
-                            color = tokens.textPrimary
+                            text = "${capturedUris.size} / $maxPhotos",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = tokens.textSecondary
                         )
                     }
 
                     AnimatedVisibility(
                         visible = capturedUris.isNotEmpty(),
-                        enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.9f),
-                        exit = fadeOut(tween(120)) + scaleOut(targetScale = 0.9f)
+                        enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.94f),
+                        exit = fadeOut(tween(120)) + scaleOut(targetScale = 0.94f)
                     ) {
                         Surface(
                             onClick = {
@@ -499,27 +485,27 @@ fun KartInAppCameraDialog(
                                 }
                                 onDismiss()
                             },
-                            shape = CircleShape,
+                            shape = RoundedCornerShape(10.dp),
                             color = KartPrimary,
                             contentColor = Color.White,
-                            shadowElevation = 6.dp,
+                            shadowElevation = 0.dp,
                             modifier = Modifier.testTag("camera_done_btn")
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                             ) {
                                 Icon(
                                     imageVector = KartLucideIcons.Check,
                                     contentDescription = null,
                                     tint = Color.White,
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = "Done (${capturedUris.size})",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Black,
+                                    text = "Use ${capturedUris.size}",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
                                     color = Color.White
                                 )
                             }
@@ -534,19 +520,17 @@ fun KartInAppCameraDialog(
                     exit = fadeOut(tween(140)) + shrinkVertically()
                 ) {
                     LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(vertical = 2.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         itemsIndexed(capturedUris, key = { _, uri -> uri.toString() }) { idx, uri ->
                             val isMain = idx == 0 && existingPhotoCount == 0
-                            val badgeLabel = if (isMain) "MAIN" else "#${existingPhotoCount + idx + 1}"
                             Box(
                                 modifier = Modifier
-                                    .size(60.dp)
-                                    .shadow(4.dp, RoundedCornerShape(18.dp))
-                                    .clip(RoundedCornerShape(18.dp))
-                                    .border(2.dp, Color.White, RoundedCornerShape(18.dp))
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.dp, tokens.cardBorder, RoundedCornerShape(12.dp))
                             ) {
                                 AsyncImage(
                                     model = uri,
@@ -555,21 +539,22 @@ fun KartInAppCameraDialog(
                                     modifier = Modifier.fillMaxSize()
                                 )
 
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopStart)
-                                        .padding(4.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isMain) KartPrimary else Color.Black.copy(alpha = 0.72f))
-                                        .padding(horizontal = 5.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = badgeLabel,
-                                        color = Color.White,
-                                        fontSize = 8.sp,
-                                        fontWeight = FontWeight.Black,
-                                        letterSpacing = 0.4.sp
-                                    )
+                                if (isMain) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomCenter)
+                                            .fillMaxWidth()
+                                            .background(Color.Black.copy(alpha = 0.56f))
+                                            .padding(vertical = 2.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "Cover",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
                                 }
 
                                 Box(
@@ -577,10 +562,9 @@ fun KartInAppCameraDialog(
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
                                         .padding(4.dp)
-                                        .size(20.dp)
+                                        .size(18.dp)
                                         .clip(CircleShape)
-                                        .background(KartDanger)
-                                        .border(1.dp, Color.White.copy(alpha = 0.7f), CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.65f))
                                         .clickable {
                                             capturedUris = capturedUris.filterIndexed { i, _ -> i != idx }
                                         }
@@ -598,15 +582,15 @@ fun KartInAppCameraDialog(
                     }
                 }
 
-                // Rounded Live Viewfinder Card (matches repo rounded-[38px] shadow-2xl container)
+                // Recessed Live Viewfinder Well (inset bezel + inner vignette depth instead of drop shadow)
+                val viewfinderShape = RoundedCornerShape(28.dp)
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .shadow(14.dp, RoundedCornerShape(34.dp))
-                        .clip(RoundedCornerShape(34.dp))
+                        .clip(viewfinderShape)
                         .background(Color(0xFF0E0E11))
-                        .border(1.dp, tokens.cardBorder, RoundedCornerShape(34.dp))
+                        .border(1.dp, tokens.cardBorder, viewfinderShape)
                 ) {
                     if (cameraError != null) {
                         Column(
@@ -715,6 +699,40 @@ fun KartInAppCameraDialog(
                         }
                     }
 
+                    // Subtle inset depth vignette at top and bottom of the viewfinder well
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(Color.Black.copy(alpha = 0.34f), Color.Transparent)
+                                )
+                            )
+                    )
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.52f))
+                                )
+                            )
+                    )
+
+                    // Viewfinder-only shutter flash (clipped to the rounded viewfinder well, beneath controls)
+                    if (shutterFlashAlpha.value > 0.01f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .alpha(shutterFlashAlpha.value)
+                                .background(Color.White)
+                        )
+                    }
+
                     // Bottom Floating Controls: Cancel (X), Shutter Ring, Flip Camera
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -722,7 +740,7 @@ fun KartInAppCameraDialog(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .padding(start = 28.dp, end = 28.dp, bottom = 30.dp)
+                            .padding(start = 28.dp, end = 28.dp, bottom = 28.dp)
                     ) {
                         CameraFrostedCircleButton(
                             icon = KartLucideIcons.X,
@@ -741,7 +759,9 @@ fun KartInAppCameraDialog(
                             icon = KartLucideIcons.RefreshCw,
                             contentDescription = "Flip camera",
                             testTag = "camera_flip_btn",
+                            iconRotation = flipRotation,
                             onClick = {
+                                flipCount++
                                 lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
                                     CameraSelector.LENS_FACING_FRONT
                                 } else {
@@ -752,18 +772,7 @@ fun KartInAppCameraDialog(
                     }
                 }
             }
-
-            // Crisp shutter flash overlay
-            if (flashAlpha > 0.01f) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .alpha(flashAlpha)
-                        .background(Color.White)
-                )
-            }
         }
-    }
 }
 
 @Composable
@@ -771,6 +780,7 @@ private fun CameraFrostedCircleButton(
     icon: ImageVector,
     contentDescription: String,
     testTag: String,
+    iconRotation: Float = 0f,
     onClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -802,7 +812,9 @@ private fun CameraFrostedCircleButton(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = Color.White,
-            modifier = Modifier.size(25.dp)
+            modifier = Modifier
+                .size(25.dp)
+                .graphicsLayer { rotationZ = iconRotation }
         )
     }
 }
