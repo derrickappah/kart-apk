@@ -18,6 +18,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,9 +28,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -57,6 +62,7 @@ fun AdminDashboardScreen(
     isAdmin: Boolean,
     currentUserId: String = "",
     viewModel: AdminViewModel,
+    onBuyNowSettingChanged: (Boolean) -> Unit = {},
     onBack: () -> Unit,
     onShowMessage: (String) -> Unit
 ) {
@@ -117,7 +123,85 @@ fun AdminDashboardScreen(
             ) {
                 when (selectedTab) {
                     "Overview" -> item {
+                        val buyNowEnabled = bundle?.buyNowEnabled ?: true
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "Storefront Controls",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            color = KartThemeTokens.colors.textSecondary
+                                        )
+                                        StatusPill(
+                                            text = if (buyNowEnabled) "Buy Now Active" else "Buy Now Off",
+                                            containerColor = if (buyNowEnabled) KartSuccessContainer else KartWarningContainer,
+                                            contentColor = if (buyNowEnabled) KartSuccess else KartWarning
+                                        )
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text(
+                                                text = "Buy Now on Product Pages",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = if (buyNowEnabled) {
+                                                    "Buyers can tap Buy Now on product details pages to complete checkout."
+                                                } else {
+                                                    "Buy Now is hidden on product details pages and direct checkout is paused. Buyers can still chat with sellers."
+                                                },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = KartThemeTokens.colors.textSecondary
+                                            )
+                                        }
+                                        Switch(
+                                            checked = buyNowEnabled,
+                                            enabled = !state.actionLoading,
+                                            onCheckedChange = { nextEnabled ->
+                                                if (!nextEnabled) {
+                                                    pendingConfirm = Triple(
+                                                        "Turn Off Buy Now?",
+                                                        "This hides the Buy Now button on all product detail pages and pauses direct checkout until you turn it back on."
+                                                    ) {
+                                                        viewModel.setBuyNowEnabled(false, onBuyNowSettingChanged)
+                                                    }
+                                                } else {
+                                                    viewModel.setBuyNowEnabled(true, onBuyNowSettingChanged)
+                                                }
+                                            },
+                                            colors = SwitchDefaults.colors(
+                                                checkedThumbColor = Color.White,
+                                                checkedTrackColor = KartPrimary
+                                            ),
+                                            modifier = Modifier.testTag("admin_buy_now_switch")
+                                        )
+                                    }
+                                }
+                            }
+
                             AdminMetricRow("Loaded Users", "${bundle?.users?.size ?: 0}")
                             AdminMetricRow("Active Listings", "${bundle?.products?.count { it.isActiveListing } ?: 0}")
                             AdminMetricRow("Recent Orders", "${bundle?.orders?.size ?: 0}")

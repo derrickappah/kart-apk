@@ -466,13 +466,21 @@ fun KartAppRoot(
                                     viewModel = productDetailVm,
                                     currentUserId = sessionState.session.userId.ifBlank { null },
                                     wishlistIds = sessionState.wishlistIds,
+                                    buyNowEnabled = sessionState.buyNowEnabled,
+                                    onRefreshPlatformFlags = sessionViewModel::refreshPlatformFlags,
                                     onBack = { navController.popBackStack() },
                                     onWishlistToggle = { id ->
                                         sessionViewModel.toggleWishlist(id) { navController.navigate("login") }
                                     },
                                     onRequireAuth = { navController.navigate("login") },
                                     onOpenChat = { convId -> navController.navigate("chat/$convId") },
-                                    onBuyNow = { id -> navController.navigate("checkout/$id") },
+                                    onBuyNow = { id ->
+                                        if (sessionState.buyNowEnabled) {
+                                            navController.navigate("checkout/$id")
+                                        } else {
+                                            sessionViewModel.showMessage("Buy Now is currently turned off. Please chat with the seller instead.")
+                                        }
+                                    },
                                     onSellerClick = { sid -> navController.navigate("public_profile/$sid") },
                                     onProductClick = { p -> navController.navigate("product/${p.id}") },
                                     onShowMessage = sessionViewModel::showMessage
@@ -495,6 +503,7 @@ fun KartAppRoot(
                                         productId = pid,
                                         repository = repository,
                                         currentUserId = sessionState.session.userId.ifBlank { null },
+                                        buyNowEnabled = sessionState.buyNowEnabled,
                                         onBack = { navController.popBackStack() },
                                         onOrderCreated = { orderId ->
                                             val uid = sessionState.session.userId
@@ -955,6 +964,7 @@ fun KartAppRoot(
                                     isAdmin = sessionState.isAdmin,
                                     currentUserId = sessionState.session.userId,
                                     viewModel = adminVm,
+                                    onBuyNowSettingChanged = sessionViewModel::applyBuyNowEnabled,
                                     onBack = { navController.popBackStack() },
                                     onShowMessage = sessionViewModel::showMessage
                                 )

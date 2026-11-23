@@ -16,6 +16,7 @@ import com.example.domain.model.MarketplaceProductsResponse
 import com.example.domain.model.MessageRow
 import com.example.domain.model.NotificationItem
 import com.example.domain.model.Order
+import com.example.domain.model.PlatformFlags
 import com.example.domain.model.Product
 import com.example.domain.model.Profile
 import com.example.domain.model.RefundRequestRow
@@ -101,7 +102,9 @@ data class AdminDashboardBundle(
     val reviews: List<Review>,
     val advertisements: List<ActiveAdvertisementRow>,
     val campuses: List<CampusRow>,
-    val usersById: Map<String, Profile> = emptyMap()
+    val usersById: Map<String, Profile> = emptyMap(),
+    val buyNowEnabled: Boolean = true,
+    val isMaintenanceMode: Boolean = false
 )
 
 class KartRepository(
@@ -126,6 +129,8 @@ class KartRepository(
             "whatsapp_number", "instagram", "snapchat", "avatar_url"
         )
         private val ACTIVE_ORDER_STATUSES = setOf("paid", "shipped", "disputed")
+        const val KEY_MAINTENANCE_MODE = "maintenance_mode"
+        const val KEY_BUY_NOW_ENABLED = "buy_now_enabled"
     }
 
     private fun requireKeyMessage(): String =
@@ -577,15 +582,32 @@ class KartRepository(
         }.getOrNull()
     }
 
-    suspend fun isMaintenanceMode(): Boolean {
-        if (!hasSupabaseKey()) return false
+    suspend fun fetchPlatformFlags(): PlatformFlags {
+        if (!hasSupabaseKey()) return PlatformFlags()
         return runCatching {
-            val res = supabaseApi.getPlatformSettings(
-                mapOf("select" to "key,value", "key" to "eq.maintenance_mode", "limit" to "1")
-            ).body()?.firstOrNull()
-            res?.value?.toString()?.equals("true", true) == true
-        }.getOrDefault(false)
+            val rows = supabaseApi.getPlatformSettings(
+                mapOf(
+                    "select" to "key,value",
+                    "key" to "in.($KEY_MAINTENANCE_MODE,$KEY_BUY_NOW_ENABLED)"
+                )
+            ).body().orEmpty()
+            val byKey = rows.associateBy { it.key.lowercase(Locale.US) }
+            PlatformFlags(
+                isMaintenanceMode = KartFormatters.parseBooleanSetting(
+                    byKey[KEY_MAINTENANCE_MODE]?.value,
+                    default = false
+                ),
+                buyNowEnabled = KartFormatters.parseBooleanSetting(
+                    byKey[KEY_BUY_NOW_ENABLED]?.value,
+                    default = true
+                )
+            )
+        }.getOrDefault(PlatformFlags())
     }
+
+    suspend fun isMaintenanceMode(): Boolean = fetchPlatformFlags().isMaintenanceMode
+
+    suspend fun isBuyNowEnabled(): Boolean = fetchPlatformFlags().buyNowEnabled
 
     suspend fun fetchProfileBundle(targetUserId: String, currentUserId: String?): ApiResult<ProfileBundle> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
@@ -1069,25 +1091,73 @@ class KartRepository(
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         if (currentUserId == sellerId) return ApiResult.Error("You cannot start a conversation with yourself.")
         return try {
-            val existingList = supabaseApi.getConversations(
-                mapOf("select" to "*", "participants" to "cs.{$currentUserId,$sellerId}")
-            ).body().orEmpty()
+            suspend fun findExistingConversations(): List<com.example.domain.model.ConversationRow> {
+                val direct = runCatching {
+                    supabaseApi.getConversations(
+                        mapOf(
+                            "select" to "*",
+                            "participants" to "cs.{$currentUserId,$sellerId}",
+                            "order" to "updated_at.desc"
+                        )
+                    ).body().orEmpty()
+                }.getOrDefault(emptyList())
+                if (direct.isNotEmpty()) return direct
 
-            val existing = if (!productId.isNullOrBlank()) {
+                return runCatching {
+                    supabaseApi.getConversations(
+                        mapOf(
+                            "select" to "*",
+                            "participants" to "cs.{$currentUserId}",
+                            "order" to "updated_at.desc",
+                            "limit" to "100"
+                        )
+                    ).body().orEmpty().filter { sellerId in it.participants }
+                }.getOrDefault(emptyList())
+            }
+
+            val existingList = findExistingConversations()
+
+            val exactMatch = if (!productId.isNullOrBlank()) {
                 existingList.firstOrNull { it.productId == productId }
             } else {
                 existingList.firstOrNull()
             }
+            if (exactMatch != null) return ApiResult.Success(exactMatch.id)
 
-            if (existing != null) return ApiResult.Success(existing.id)
-
-            val createBody = buildMap<String, Any?> {
-                put("participants", listOf(currentUserId, sellerId))
-                if (!productId.isNullOrBlank()) put("product_id", productId)
+            var lastError: String? = null
+            val candidateBodies = buildList<Map<String, Any?>> {
+                if (!productId.isNullOrBlank()) {
+                    add(mapOf("participants" to listOf(currentUserId, sellerId), "product_id" to productId))
+                }
+                add(mapOf("participants" to listOf(currentUserId, sellerId)))
             }
-            val created = supabaseApi.createConversation(body = createBody)
-            val id = created.body()?.firstOrNull()?.id
-            if (id != null) ApiResult.Success(id) else ApiResult.Error("Could not start conversation.")
+
+            for (body in candidateBodies) {
+                val created = supabaseApi.createConversation(body = body)
+                if (created.isSuccessful) {
+                    val createdId = created.body()?.firstOrNull()?.id
+                    if (!createdId.isNullOrBlank()) return ApiResult.Success(createdId)
+                    // Some RLS setups return 201 with an empty representation; re-fetch the new thread
+                    val refetched = findExistingConversations()
+                    val matchId = refetched.firstOrNull { !productId.isNullOrBlank() && it.productId == productId }?.id
+                        ?: refetched.firstOrNull()?.id
+                    if (!matchId.isNullOrBlank()) return ApiResult.Success(matchId)
+                } else {
+                    lastError = extractHttpErrorMessage(created) ?: "Could not start conversation (${created.code()})."
+                    // If the database enforces one conversation per buyer/seller pair, reuse the existing thread
+                    if (existingList.isNotEmpty()) {
+                        return ApiResult.Success(existingList.first().id)
+                    }
+                }
+            }
+
+            // Final fallback: re-check existing conversations in case of a race or unique conflict
+            val fallbackId = findExistingConversations().firstOrNull()?.id
+            if (!fallbackId.isNullOrBlank()) {
+                ApiResult.Success(fallbackId)
+            } else {
+                ApiResult.Error(lastError ?: "Could not start conversation.")
+            }
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Error starting chat.")
         }
@@ -1870,6 +1940,8 @@ class KartRepository(
                 }
             }
 
+            val flags = fetchPlatformFlags()
+
             ApiResult.Success(
                 AdminDashboardBundle(
                     users = users,
@@ -1882,7 +1954,9 @@ class KartRepository(
                     reviews = reviews,
                     advertisements = ads,
                     campuses = campuses,
-                    usersById = usersMap
+                    usersById = usersMap,
+                    buyNowEnabled = flags.buyNowEnabled,
+                    isMaintenanceMode = flags.isMaintenanceMode
                 )
             )
         } catch (e: Exception) {
@@ -1917,6 +1991,138 @@ class KartRepository(
     suspend fun adminResolveRefund(orderId: String, requestId: String, approve: Boolean): ApiResult<Unit> = runApiAction {
         if (approve) kartWebApi.adminRefundOrder(mapOf("orderId" to orderId))
         else kartWebApi.adminRejectRefund(mapOf("requestId" to requestId))
+    }
+
+    suspend fun adminSetPlatformSetting(key: String, value: Boolean): ApiResult<Unit> {
+        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
+        val currentUserId = sessionStore.currentSession().userId
+        val profile = fetchMyProfile(currentUserId)
+        if (profile?.isAdmin != true) {
+            return ApiResult.Error("Admin access required to update platform settings.")
+        }
+
+        val payloads: List<Map<String, Any>> = listOf(
+            mapOf("key" to key, "value" to value),
+            mapOf("key" to key, "value" to value.toString()),
+            mapOf(key to value),
+            mapOf("settings" to mapOf(key to value))
+        )
+        val webSenders: List<Pair<String, suspend (Map<String, Any>) -> retrofit2.Response<Map<String, Any>>>> = listOf(
+            "PATCH" to { body -> kartWebApi.adminPatchSettings(body) },
+            "PUT" to { body -> kartWebApi.adminPutSettings(body) },
+            "POST" to { body -> kartWebApi.adminUpdateSettings(body) }
+        )
+
+        var lastWebError: String? = null
+        for ((_, sender) in webSenders) {
+            var methodNotAllowed = false
+            for (payload in payloads) {
+                val res = runCatching { sender(payload) }.getOrNull() ?: break
+                if (res.isSuccessful) {
+                    val persisted = if (key == KEY_BUY_NOW_ENABLED) {
+                        isBuyNowEnabled() == value
+                    } else if (key == KEY_MAINTENANCE_MODE) {
+                        isMaintenanceMode() == value
+                    } else true
+                    if (persisted) return ApiResult.Success(Unit)
+                    lastWebError = "Settings endpoint ignored payload format; trying fallback."
+                    continue
+                }
+                val code = res.code()
+                if (code == 405) {
+                    methodNotAllowed = true
+                    break
+                }
+                val parsedErr = extractHttpErrorMessage(res)
+                lastWebError = parsedErr ?: "Admin settings update failed ($code)."
+                // Only retry alternate payload shapes on client validation errors (400 / 422)
+                if (code != 400 && code != 422) {
+                    break
+                }
+            }
+            if (!methodNotAllowed) break
+        }
+
+        // Fallback to direct Supabase PostgREST (enforced by admin RLS on platform_settings)
+        var lastDbError: String? = null
+        val nowIso = nowIsoUtc()
+        val patchValues: List<Any> = listOf(value, value.toString())
+        for (candidateVal in patchValues) {
+            val patchRes = runCatching {
+                supabaseApi.patchPlatformSetting(
+                    keyFilter = "eq.$key",
+                    body = mapOf(
+                        "value" to candidateVal,
+                        "updated_at" to nowIso,
+                        "updated_by" to currentUserId.ifBlank { null }
+                    )
+                )
+            }.getOrNull()
+            if (patchRes?.isSuccessful == true && !patchRes.body().isNullOrEmpty()) {
+                return ApiResult.Success(Unit)
+            }
+            if (patchRes != null && !patchRes.isSuccessful) {
+                lastDbError = extractHttpErrorMessage(patchRes) ?: "Database update failed (${patchRes.code()})."
+            }
+        }
+
+        val fallbackCategory = runCatching {
+            supabaseApi.getPlatformSettings(
+                mapOf("select" to "key,value,category", "limit" to "1")
+            ).body()?.firstOrNull()?.category?.takeIf { it.isNotBlank() }
+        }.getOrNull() ?: "general"
+
+        val settingLabel = when (key) {
+            KEY_BUY_NOW_ENABLED -> "Buy Now on Product Pages"
+            KEY_MAINTENANCE_MODE -> "Maintenance Mode"
+            else -> key.replace('_', ' ').replaceFirstChar { it.uppercase() }
+        }
+        val settingDescription = when (key) {
+            KEY_BUY_NOW_ENABLED -> "Controls whether buyers can tap Buy Now and complete checkout from product detail pages."
+            KEY_MAINTENANCE_MODE -> "Temporarily places Kart into maintenance mode for non-admin users."
+            else -> "Platform configuration toggle for $settingLabel."
+        }
+
+        for (candidateVal in patchValues) {
+            val upsertRes = runCatching {
+                supabaseApi.upsertPlatformSetting(
+                    body = mapOf(
+                        "key" to key,
+                        "value" to candidateVal,
+                        "category" to fallbackCategory,
+                        "label" to settingLabel,
+                        "description" to settingDescription,
+                        "updated_at" to nowIso,
+                        "updated_by" to currentUserId.ifBlank { null }
+                    )
+                )
+            }.getOrNull()
+            if (upsertRes?.isSuccessful == true) {
+                return ApiResult.Success(Unit)
+            }
+            if (upsertRes != null && !upsertRes.isSuccessful) {
+                lastDbError = extractHttpErrorMessage(upsertRes) ?: "Database upsert failed (${upsertRes.code()})."
+            }
+        }
+
+        return ApiResult.Error(
+            lastDbError
+                ?: lastWebError
+                ?: "Could not update platform setting. Ensure the platform_settings migration is applied on Supabase."
+        )
+    }
+
+    private fun extractHttpErrorMessage(res: retrofit2.Response<*>): String? {
+        val errBody = runCatching { res.errorBody()?.string() }.getOrNull().orEmpty()
+        if (errBody.isBlank()) return null
+        return runCatching {
+            val json = org.json.JSONObject(errBody)
+            json.optString("error").ifBlank {
+                json.optString("message").ifBlank {
+                    json.optString("details").ifBlank { null }
+                }
+            }
+        }.getOrNull() ?: errBody.take(180)
     }
 
     private suspend fun runApiAction(call: suspend () -> retrofit2.Response<Map<String, Any>>): ApiResult<Unit> {

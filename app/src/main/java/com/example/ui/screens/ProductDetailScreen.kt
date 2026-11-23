@@ -111,6 +111,8 @@ fun ProductDetailScreen(
     viewModel: ProductDetailViewModel,
     currentUserId: String?,
     wishlistIds: Set<String>,
+    buyNowEnabled: Boolean = true,
+    onRefreshPlatformFlags: () -> Unit = {},
     onBack: () -> Unit,
     onWishlistToggle: (String) -> Unit,
     onRequireAuth: () -> Unit,
@@ -128,6 +130,7 @@ fun ProductDetailScreen(
     var showReportDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(productId, currentUserId) {
+        onRefreshPlatformFlags()
         viewModel.loadProduct(productId, currentUserId)
     }
 
@@ -338,6 +341,7 @@ fun ProductDetailScreen(
                     isOwner = isOwner,
                     isOutOfStock = product.isOutOfStock,
                     isActive = product.isActiveListing,
+                    buyNowEnabled = buyNowEnabled,
                     actionLoading = state.actionLoading,
                     onChatClick = {
                         if (currentUserId == null) onRequireAuth()
@@ -346,8 +350,13 @@ fun ProductDetailScreen(
                         }
                     },
                     onBuyNowClick = {
-                        if (currentUserId == null) onRequireAuth()
-                        else onBuyNow(product.id)
+                        if (!buyNowEnabled) {
+                            onShowMessage("Buy Now is currently turned off. Please chat with the seller instead.")
+                        } else if (currentUserId == null) {
+                            onRequireAuth()
+                        } else {
+                            onBuyNow(product.id)
+                        }
                     },
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
@@ -1332,13 +1341,14 @@ private fun ProductStickyBottomBar(
     isOwner: Boolean,
     isOutOfStock: Boolean,
     isActive: Boolean,
+    buyNowEnabled: Boolean,
     actionLoading: Boolean,
     onChatClick: () -> Unit,
     onBuyNowClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tokens = KartThemeTokens.colors
-    val canBuy = !isOutOfStock && isActive
+    val canBuy = !isOutOfStock && isActive && buyNowEnabled
 
     Surface(
         color = MaterialTheme.colorScheme.background,
@@ -1374,6 +1384,52 @@ private fun ProductStickyBottomBar(
                                 color = tokens.textSecondary
                             )
                         }
+                    }
+                } else if (!buyNowEnabled) {
+                    Button(
+                        onClick = onChatClick,
+                        enabled = !actionLoading,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = KartPrimary,
+                            contentColor = Color.White,
+                            disabledContainerColor = KartPrimary.copy(alpha = 0.45f),
+                            disabledContentColor = Color.White.copy(alpha = 0.85f)
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(
+                            defaultElevation = 0.dp,
+                            pressedElevation = 0.dp
+                        ),
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("product_chat_btn")
+                    ) {
+                        if (actionLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        } else {
+                            Icon(
+                                imageVector = KartLucideIcons.MessageCircleActive,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(
+                            text = "Chat with Seller · $priceText",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 } else {
                     OutlinedButton(

@@ -174,4 +174,19 @@ class ExampleUnitTest {
     assertFalse(draftStatus.isOutOfStock)
     assertFalse(draftStatus.isActiveListing)
   }
+
+  @Test
+  fun parseBooleanSetting_handlesJsonTypesAndDefaults() {
+    assertTrue(KartFormatters.parseBooleanSetting(null, default = true))
+    assertFalse(KartFormatters.parseBooleanSetting(null, default = false))
+    assertFalse(KartFormatters.parseBooleanSetting(false, default = true))
+    assertTrue(KartFormatters.parseBooleanSetting(true, default = false))
+    assertFalse(KartFormatters.parseBooleanSetting("false", default = true))
+    assertFalse(KartFormatters.parseBooleanSetting("\"false\"", default = true))
+    assertTrue(KartFormatters.parseBooleanSetting("true", default = false))
+    assertFalse(KartFormatters.parseBooleanSetting(mapOf("enabled" to false), default = true))
+    assertTrue(KartFormatters.parseBooleanSetting(mapOf("value" to "true"), default = false))
+    assertFalse(KartFormatters.parseBooleanSetting(0, default = true))
+    assertTrue(KartFormatters.parseBooleanSetting(1, default = false))
+  }
 }

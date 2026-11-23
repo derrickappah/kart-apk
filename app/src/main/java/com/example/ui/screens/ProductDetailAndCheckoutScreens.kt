@@ -67,6 +67,7 @@ fun CheckoutScreen(
     productId: String,
     repository: KartRepository,
     currentUserId: String?,
+    buyNowEnabled: Boolean = true,
     onBack: () -> Unit,
     onOrderCreated: (String) -> Unit,
     onShowMessage: (String) -> Unit
@@ -77,6 +78,7 @@ fun CheckoutScreen(
 
     var product by remember { mutableStateOf<Product?>(null) }
     var walletBalance by remember { mutableStateOf(0.0) }
+    var liveBuyNowEnabled by remember(buyNowEnabled) { mutableStateOf(buyNowEnabled) }
     var loading by remember { mutableStateOf(true) }
     var submitting by remember { mutableStateOf(false) }
     var quantity by remember { mutableIntStateOf(1) }
@@ -84,6 +86,7 @@ fun CheckoutScreen(
 
     LaunchedEffect(productId, currentUserId) {
         loading = true
+        liveBuyNowEnabled = repository.isBuyNowEnabled()
         val detailRes = repository.fetchProductDetail(productId, currentUserId)
         if (detailRes is ApiResult.Success) product = detailRes.data.product
         if (!currentUserId.isNullOrBlank()) {
@@ -100,7 +103,18 @@ fun CheckoutScreen(
     ) {
         KartSubScreenTopBar(title = "Secure Checkout", onBack = onBack)
 
-        if (currentUserId.isNullOrBlank()) {
+        if (!buyNowEnabled || !liveBuyNowEnabled) {
+            EmptyStateView(
+                asset = EmptyStateAsset.ORDERS,
+                title = "Buy Now is currently off",
+                subtitle = "Direct checkout has been paused by Kart. You can go back to the listing and chat with the seller directly.",
+                actionLabel = "Go Back",
+                onActionClick = onBack,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            )
+        } else if (currentUserId.isNullOrBlank()) {
             EmptyStateView(
                 asset = EmptyStateAsset.AUTH_ERROR,
                 title = "Sign in required",
@@ -324,6 +338,13 @@ fun CheckoutScreen(
                         onClick = {
                             scope.launch {
                                 submitting = true
+                                val stillEnabled = repository.isBuyNowEnabled()
+                                liveBuyNowEnabled = stillEnabled
+                                if (!stillEnabled) {
+                                    submitting = false
+                                    onShowMessage("Buy Now has been turned off. Please chat with the seller instead.")
+                                    return@launch
+                                }
                                 // Re-verify fresh listing price, availability, and wallet balance before payment
                                 val freshDetail = repository.fetchProductDetail(item.id, currentUserId)
                                 if (freshDetail is ApiResult.Success) {

@@ -29,6 +29,7 @@ data class SessionUiState(
     val unreadMessages: Int = 0,
     val unreadNotifications: Int = 0,
     val isMaintenanceMode: Boolean = false,
+    val buyNowEnabled: Boolean = true,
     val isBanned: Boolean = false,
     val snackbarMessage: String? = null,
     val authLoading: Boolean = false,
@@ -107,8 +108,13 @@ class SessionViewModel(
             }
         }
         viewModelScope.launch {
-            val maint = repository.isMaintenanceMode()
-            _uiState.update { it.copy(isMaintenanceMode = maint) }
+            val flags = repository.fetchPlatformFlags()
+            _uiState.update {
+                it.copy(
+                    isMaintenanceMode = flags.isMaintenanceMode,
+                    buyNowEnabled = flags.buyNowEnabled
+                )
+            }
         }
         viewModelScope.launch {
             val loadedCampuses = repository.fetchCampuses()
@@ -144,12 +150,13 @@ class SessionViewModel(
                 refreshUnreadCounts(userId)
                 if (pollCycle % 2 == 0) {
                     val freshProfile = repository.fetchMyProfile(userId)
-                    val maint = repository.isMaintenanceMode()
+                    val flags = repository.fetchPlatformFlags()
                     _uiState.update {
                         it.copy(
                             profile = freshProfile ?: it.profile,
                             isBanned = freshProfile?.banned == true || it.isBanned && freshProfile == null,
-                            isMaintenanceMode = maint
+                            isMaintenanceMode = flags.isMaintenanceMode,
+                            buyNowEnabled = flags.buyNowEnabled
                         )
                     }
                 }
@@ -217,7 +224,7 @@ class SessionViewModel(
         val wishlistRes = repository.fetchWishlist(userId)
         val unreadNotifs = repository.fetchUnreadNotificationsCount(userId)
         val unreadMsgs = repository.fetchUnreadMessagesCount()
-        val maint = repository.isMaintenanceMode()
+        val flags = repository.fetchPlatformFlags()
 
         val savedIds = (wishlistRes as? ApiResult.Success)?.data?.map { it.productId }?.toSet()
             ?: _uiState.value.wishlistIds
@@ -226,13 +233,30 @@ class SessionViewModel(
             it.copy(
                 profile = profile ?: it.profile,
                 isBanned = profile?.banned == true,
-                isMaintenanceMode = maint,
+                isMaintenanceMode = flags.isMaintenanceMode,
+                buyNowEnabled = flags.buyNowEnabled,
                 wishlistIds = savedIds,
                 unreadMessages = unreadMsgs,
                 unreadNotifications = unreadNotifs
             )
         }
         return profile
+    }
+
+    fun refreshPlatformFlags() {
+        viewModelScope.launch {
+            val flags = repository.fetchPlatformFlags()
+            _uiState.update {
+                it.copy(
+                    isMaintenanceMode = flags.isMaintenanceMode,
+                    buyNowEnabled = flags.buyNowEnabled
+                )
+            }
+        }
+    }
+
+    fun applyBuyNowEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(buyNowEnabled = enabled) }
     }
 
     fun refreshUserMetadata(userId: String = _uiState.value.session.userId) {

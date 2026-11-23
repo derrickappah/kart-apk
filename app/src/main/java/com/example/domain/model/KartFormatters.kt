@@ -391,6 +391,27 @@ object KartFormatters {
         return endTs == 0L || endTs > System.currentTimeMillis()
     }
 
+    fun parseBooleanSetting(raw: Any?, default: Boolean): Boolean = when (raw) {
+        null -> default
+        is Boolean -> raw
+        is Number -> raw.toInt() != 0
+        is String -> {
+            when (raw.trim().trim('"').lowercase(Locale.US)) {
+                "true", "1", "yes", "on" -> true
+                "false", "0", "no", "off" -> false
+                else -> default
+            }
+        }
+        is Map<*, *> -> {
+            when {
+                raw.containsKey("enabled") -> parseBooleanSetting(raw["enabled"], default)
+                raw.containsKey("value") -> parseBooleanSetting(raw["value"], default)
+                else -> default
+            }
+        }
+        else -> default
+    }
+
     data class VoiceMessagePayload(
         val url: String,
         val durationSeconds: Int

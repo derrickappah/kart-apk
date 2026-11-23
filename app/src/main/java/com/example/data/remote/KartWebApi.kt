@@ -6,7 +6,9 @@ import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.Multipart
+import retrofit2.http.PATCH
 import retrofit2.http.POST
+import retrofit2.http.PUT
 import retrofit2.http.Part
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -170,6 +172,12 @@ interface KartWebApi {
 
     @POST("api/admin/refund-requests/reject")
     suspend fun adminRejectRefund(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @PATCH("api/admin/settings")
+    suspend fun adminPatchSettings(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
+
+    @PUT("api/admin/settings")
+    suspend fun adminPutSettings(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
 
     @POST("api/admin/settings")
     suspend fun adminUpdateSettings(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>

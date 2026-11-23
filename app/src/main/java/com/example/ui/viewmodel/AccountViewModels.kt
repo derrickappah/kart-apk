@@ -212,6 +212,32 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
+    fun setBuyNowEnabled(enabled: Boolean, onUpdated: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(actionLoading = true) }
+            when (val res = repository.adminSetPlatformSetting(KartRepository.KEY_BUY_NOW_ENABLED, enabled)) {
+                is ApiResult.Success -> {
+                    _uiState.update { state ->
+                        state.copy(
+                            actionLoading = false,
+                            bundle = state.bundle?.copy(buyNowEnabled = enabled),
+                            feedback = if (enabled) {
+                                "Buy Now turned on for product pages"
+                            } else {
+                                "Buy Now turned off on product pages"
+                            }
+                        )
+                    }
+                    onUpdated(enabled)
+                    loadDashboard()
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
+                }
+            }
+        }
+    }
+
     private fun runAdminCall(successMsg: String, block: suspend () -> ApiResult<Unit>) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }

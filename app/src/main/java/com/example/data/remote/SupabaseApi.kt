@@ -171,6 +171,20 @@ interface SupabaseApi {
     @GET("rest/v1/platform_settings")
     suspend fun getPlatformSettings(@QueryMap params: Map<String, String>): Response<List<PlatformSetting>>
 
+    @POST("rest/v1/platform_settings")
+    suspend fun upsertPlatformSetting(
+        @Header("Prefer") prefer: String = "resolution=merge-duplicates,return=minimal",
+        @Query("on_conflict") onConflict: String = "key",
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<Unit>
+
+    @PATCH("rest/v1/platform_settings")
+    suspend fun patchPlatformSetting(
+        @Header("Prefer") prefer: String = "return=representation",
+        @Query("key") keyFilter: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<List<PlatformSetting>>
+
     @GET("rest/v1/campuses")
     suspend fun getCampuses(@QueryMap params: Map<String, String>): Response<List<CampusRow>>
 

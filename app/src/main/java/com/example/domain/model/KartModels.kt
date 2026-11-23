@@ -399,7 +399,13 @@ data class UserSubscription(
 @JsonClass(generateAdapter = true)
 data class PlatformSetting(
     val key: String,
-    val value: Any? = null
+    val value: Any? = null,
+    val category: String? = null
+)
+
+data class PlatformFlags(
+    val isMaintenanceMode: Boolean = false,
+    val buyNowEnabled: Boolean = true
 )
 
 @JsonClass(generateAdapter = true)
