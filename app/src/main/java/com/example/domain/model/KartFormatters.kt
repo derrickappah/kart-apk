@@ -306,6 +306,91 @@ object KartFormatters {
         return rotatedNonBanner + shiftedBanner
     }
 
+    fun sanitizeDecimalInput(input: String, maxDecimals: Int = 2): String {
+        val sb = StringBuilder()
+        var dotSeen = false
+        var decimals = 0
+        for (ch in input) {
+            when {
+                ch.isDigit() -> {
+                    if (dotSeen) {
+                        if (decimals < maxDecimals) {
+                            sb.append(ch)
+                            decimals++
+                        }
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+                ch == '.' && !dotSeen -> {
+                    if (sb.isEmpty()) sb.append('0')
+                    sb.append('.')
+                    dotSeen = true
+                }
+            }
+        }
+        return sb.toString()
+    }
+
+    fun isTrustedMediaUrl(rawUrl: String): Boolean {
+        val url = rawUrl.trim()
+        if (!url.startsWith("https://", ignoreCase = true)) return false
+        val host = runCatching { java.net.URI(url).host?.lowercase(Locale.US) }.getOrNull() ?: return false
+        val configuredSupabaseHost = runCatching {
+            java.net.URI(com.example.BuildConfig.SUPABASE_URL).host?.lowercase(Locale.US)
+        }.getOrNull()
+        return host == "kart.cx" ||
+            host == "www.kart.cx" ||
+            host.endsWith(".kart.cx") ||
+            (configuredSupabaseHost != null && host == configuredSupabaseHost) ||
+            host.endsWith(".supabase.co") ||
+            host.endsWith(".supabase.in") ||
+            host == "res.cloudinary.com"
+    }
+
+    fun sanitizeSocialUrl(raw: String?, platform: String): String? {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isBlank()) return null
+        return when (platform.lowercase(Locale.US)) {
+            "instagram" -> {
+                if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
+                    val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return null
+                    val host = uri.host?.lowercase(Locale.US).orEmpty()
+                    if (uri.scheme.equals("https", true) && (host == "instagram.com" || host == "www.instagram.com")) {
+                        trimmed
+                    } else null
+                } else {
+                    val handle = trimmed.removePrefix("@").filter { it.isLetterOrDigit() || it == '.' || it == '_' }
+                    if (handle.isNotBlank()) "https://instagram.com/$handle" else null
+                }
+            }
+            "snapchat" -> {
+                if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
+                    val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return null
+                    val host = uri.host?.lowercase(Locale.US).orEmpty()
+                    if (uri.scheme.equals("https", true) && (host == "snapchat.com" || host == "www.snapchat.com")) {
+                        trimmed
+                    } else null
+                } else {
+                    val handle = trimmed.removePrefix("@").filter { it.isLetterOrDigit() || it == '.' || it == '_' || it == '-' }
+                    if (handle.isNotBlank()) "https://snapchat.com/add/$handle" else null
+                }
+            }
+            "whatsapp" -> {
+                val digits = trimmed.filter(Char::isDigit)
+                if (digits.length in 9..15) "https://wa.me/$digits" else null
+            }
+            else -> null
+        }
+    }
+
+    fun isActiveSubscription(sub: UserSubscription?): Boolean {
+        if (sub == null) return false
+        if (!sub.status.equals("Active", ignoreCase = true)) return false
+        val endTs = parseIsoTimestamp(sub.endDate)
+        return endTs == 0L || endTs > System.currentTimeMillis()
+    }
+
     data class VoiceMessagePayload(
         val url: String,
         val durationSeconds: Int
@@ -317,10 +402,11 @@ object KartFormatters {
             val inner = trimmed.removePrefix("[VOICE:").removeSuffix("]").trim()
             val parts = inner.split("|", limit = 2)
             val url = parts.getOrNull(0)?.trim().orEmpty()
-            val dur = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0
-            if (url.isNotBlank()) return VoiceMessagePayload(url, dur)
+            val dur = (parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0).coerceIn(0, 600)
+            if (url.isNotBlank() && isTrustedMediaUrl(url)) return VoiceMessagePayload(url, dur)
+            return null
         }
-        if (trimmed.startsWith("https://") &&
+        if (isTrustedMediaUrl(trimmed) &&
             (trimmed.endsWith(".m4a", true) ||
                 trimmed.endsWith(".aac", true) ||
                 trimmed.endsWith(".mp3", true) ||
@@ -343,9 +429,10 @@ object KartFormatters {
         val trimmed = content.trim()
         if (extractMessageVoice(trimmed) != null) return null
         if (trimmed.startsWith("[IMAGE:") && trimmed.endsWith("]")) {
-            return trimmed.removePrefix("[IMAGE:").removeSuffix("]").trim()
+            val url = trimmed.removePrefix("[IMAGE:").removeSuffix("]").trim()
+            return url.takeIf { isTrustedMediaUrl(it) }
         }
-        if (trimmed.startsWith("https://") &&
+        if (isTrustedMediaUrl(trimmed) &&
             (trimmed.contains("/storage/v1/object/") ||
                 trimmed.endsWith(".jpg", true) ||
                 trimmed.endsWith(".jpeg", true) ||
@@ -360,7 +447,7 @@ object KartFormatters {
     fun messageSnippet(content: String?): String {
         val raw = content?.trim().orEmpty()
         if (raw.isEmpty()) return "No messages yet"
-        if (extractMessageVoice(raw) != null) return "🎤 Voice message"
-        return if (extractMessageImageUrl(raw) != null) "📷 Photo" else raw
+        if (extractMessageVoice(raw) != null || raw.startsWith("[VOICE:")) return "🎤 Voice message"
+        return if (extractMessageImageUrl(raw) != null || raw.startsWith("[IMAGE:")) "📷 Photo" else raw
     }
 }

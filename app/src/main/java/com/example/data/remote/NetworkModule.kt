@@ -64,7 +64,7 @@ class KartAppContainer(context: Context) {
     }
 
     private fun isJwtExpiredOrExpiringSoon(jwt: String, leewaySeconds: Long = 60L): Boolean {
-        val exp = extractJwtExp(jwt) ?: return false
+        val exp = extractJwtExp(jwt) ?: return true
         return exp <= (System.currentTimeMillis() / 1000L) + leewaySeconds
     }
 
@@ -119,7 +119,13 @@ class KartAppContainer(context: Context) {
     private fun resolveFreshSession(): UserSession {
         val current = runBlocking { sessionStore.currentSession() }
         if (current.isLoggedIn && isJwtExpiredOrExpiringSoon(current.accessToken)) {
-            return refreshSessionLocked(current) ?: current
+            val refreshed = refreshSessionLocked(current)
+            if (refreshed != null) return refreshed
+            // If access token is already past expiry and refresh failed, clear stale session
+            if (isJwtExpiredOrExpiringSoon(current.accessToken, leewaySeconds = 0L)) {
+                runBlocking { sessionStore.clearSession() }
+                return UserSession()
+            }
         }
         return current
     }
@@ -170,11 +176,19 @@ class KartAppContainer(context: Context) {
     }
 
     private val kartWebAuthInterceptor = Interceptor { chain ->
-        val session = resolveFreshSession()
         val original = chain.request()
+        val path = original.url.encodedPath
+        val isPublicWebEndpoint = (original.method.equals("GET", ignoreCase = true) &&
+            path.startsWith("/api/marketplace/products")) ||
+            path.startsWith("/api/ads/track") ||
+            path.endsWith("/increment-views") ||
+            path.endsWith("/increment-shares")
         val builder = original.newBuilder()
             .header("Accept", "application/json")
-        applyKartWebAuthHeaders(builder, session)
+        if (!isPublicWebEndpoint) {
+            val session = resolveFreshSession()
+            applyKartWebAuthHeaders(builder, session)
+        }
         chain.proceed(builder.build())
     }
 

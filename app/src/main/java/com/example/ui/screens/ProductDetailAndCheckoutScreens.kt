@@ -100,7 +100,18 @@ fun CheckoutScreen(
     ) {
         KartSubScreenTopBar(title = "Secure Checkout", onBack = onBack)
 
-        if (loading) {
+        if (currentUserId.isNullOrBlank()) {
+            EmptyStateView(
+                asset = EmptyStateAsset.AUTH_ERROR,
+                title = "Sign in required",
+                subtitle = "Please sign in to your Kart account before checking out.",
+                actionLabel = "Go Back",
+                onActionClick = onBack,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            )
+        } else if (loading) {
             Column(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
                 modifier = Modifier.padding(20.dp)
@@ -122,13 +133,17 @@ fun CheckoutScreen(
             )
         } else {
             val item = product!!
-            val isOutOfStock = (item.stockQuantity ?: 1) <= 0
-            val isInactive = !item.status.isNullOrBlank() && !item.status.equals("Active", ignoreCase = true)
-            val isSelfPurchase = !currentUserId.isNullOrBlank() &&
-                (item.sellerId == currentUserId || item.seller?.id == currentUserId)
-            val canCheckout = !isOutOfStock && !isInactive && !isSelfPurchase
-            val maxStock = (item.stockQuantity ?: 10).coerceAtLeast(1)
-            val subtotal = item.price * quantity
+            val isOutOfStock = item.isOutOfStock
+            val isInactive = !item.isActiveListing
+            val hasInvalidPrice = !item.price.isFinite() || item.price <= 0.0
+            val isSelfPurchase = item.sellerId == currentUserId || item.seller?.id == currentUserId
+            val maxStock = (item.stockQuantity ?: 1).coerceAtLeast(1)
+            val safeQuantity = quantity.coerceIn(1, maxStock)
+            if (safeQuantity != quantity) {
+                quantity = safeQuantity
+            }
+            val canCheckout = !isOutOfStock && !isInactive && !isSelfPurchase && !hasInvalidPrice
+            val subtotal = item.price * safeQuantity
             val canPayWallet = walletBalance >= subtotal
 
             LazyColumn(
@@ -172,7 +187,7 @@ fun CheckoutScreen(
                                     color = KartPrimary
                                 )
                                 Text(
-                                    item.campus ?: "On Campus",
+                                    "${item.campus ?: "On Campus"} • ${if (isOutOfStock) "Out of stock" else "$maxStock available"}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = tokens.textSecondary
                                 )
@@ -192,18 +207,27 @@ fun CheckoutScreen(
                             .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
                             .padding(horizontal = 16.dp, vertical = 10.dp)
                     ) {
-                        Text("Quantity", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Column {
+                            Text("Quantity", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text("Max $maxStock available", style = MaterialTheme.typography.bodySmall, color = tokens.textSecondary)
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { if (quantity > 1) quantity-- }) {
+                            IconButton(
+                                onClick = { if (quantity > 1) quantity-- },
+                                enabled = quantity > 1 && canCheckout
+                            ) {
                                 Icon(KartLucideIcons.Minus, contentDescription = "Decrease quantity")
                             }
                             Text(
-                                text = "$quantity",
+                                text = "$safeQuantity",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 12.dp)
                             )
-                            IconButton(onClick = { if (quantity < maxStock) quantity++ }) {
+                            IconButton(
+                                onClick = { if (quantity < maxStock) quantity++ },
+                                enabled = quantity < maxStock && canCheckout
+                            ) {
                                 Icon(KartLucideIcons.Plus, contentDescription = "Increase quantity")
                             }
                         }
@@ -226,7 +250,7 @@ fun CheckoutScreen(
                         PaymentMethodOption(
                             title = "Kart Wallet",
                             subtitle = "Available balance: ${KartFormatters.formatCedis(walletBalance)}" +
-                                if (!canPayWallet) " (Insufficient funds)" else "",
+                                if (!canPayWallet) " (Need ${KartFormatters.formatCedis((subtotal - walletBalance).coerceAtLeast(0.0))} more)" else "",
                             icon = KartLucideIcons.Wallet,
                             selected = paymentMethod == "wallet",
                             onClick = { paymentMethod = "wallet" }
@@ -246,14 +270,18 @@ fun CheckoutScreen(
                             modifier = Modifier.padding(16.dp)
                         ) {
                             Text("Order Summary", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            SummaryRow("Item Subtotal", KartFormatters.formatCedis(subtotal))
+                            SummaryRow("Item Subtotal ($safeQuantity × ${KartFormatters.formatCedis(item.price)})", KartFormatters.formatCedis(subtotal))
                             SummaryRow("Escrow Protection", "Included")
+                            SummaryRow(
+                                "Processing & Escrow Fee",
+                                if (paymentMethod == "paystack") "Shown at Paystack" else "Confirmed on checkout"
+                            )
                             HorizontalDivider(color = tokens.subtleDivider, modifier = Modifier.padding(vertical = 4.dp))
                             Row(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("Total to Pay", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                Text("Estimated Total", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                                 Text(
                                     KartFormatters.formatCedis(subtotal),
                                     style = MaterialTheme.typography.titleLarge,
@@ -261,6 +289,11 @@ fun CheckoutScreen(
                                     color = KartPrimary
                                 )
                             }
+                            Text(
+                                text = "Any applicable payment gateway or escrow service fee is finalized by the server before funds are captured.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = tokens.textMuted
+                            )
                         }
                     }
                 }
@@ -281,6 +314,8 @@ fun CheckoutScreen(
                             isSelfPurchase -> "Cannot Buy Your Own Listing"
                             isOutOfStock -> "Out of Stock"
                             isInactive -> "Listing Unavailable"
+                            hasInvalidPrice -> "Invalid Listing Price"
+                            paymentMethod == "wallet" && !canPayWallet -> "Insufficient Wallet Balance"
                             paymentMethod == "wallet" -> "Pay with Kart Wallet"
                             else -> "Proceed to Paystack"
                         },
@@ -289,8 +324,50 @@ fun CheckoutScreen(
                         onClick = {
                             scope.launch {
                                 submitting = true
+                                // Re-verify fresh listing price, availability, and wallet balance before payment
+                                val freshDetail = repository.fetchProductDetail(item.id, currentUserId)
+                                if (freshDetail is ApiResult.Success) {
+                                    val fresh = freshDetail.data.product
+                                    product = fresh
+                                    val freshStock = (fresh.stockQuantity ?: 1)
+                                    val freshSelf = fresh.sellerId == currentUserId || fresh.seller?.id == currentUserId
+                                    when {
+                                        freshSelf -> {
+                                            submitting = false
+                                            onShowMessage("You cannot purchase your own listing.")
+                                            return@launch
+                                        }
+                                        !fresh.isActiveListing || fresh.isOutOfStock || freshStock < safeQuantity -> {
+                                            submitting = false
+                                            onShowMessage("This listing's availability changed. Please review before paying.")
+                                            return@launch
+                                        }
+                                        fresh.price <= 0.0 || !fresh.price.isFinite() -> {
+                                            submitting = false
+                                            onShowMessage("Listing price is invalid.")
+                                            return@launch
+                                        }
+                                        fresh.price > item.price + 0.001 -> {
+                                            submitting = false
+                                            onShowMessage("Listing price was updated to ${KartFormatters.formatCedis(fresh.price)}. Please review the new total before paying.")
+                                            return@launch
+                                        }
+                                    }
+                                    if (paymentMethod == "wallet") {
+                                        val freshWallet = repository.fetchWallet(currentUserId)
+                                        if (freshWallet is ApiResult.Success) {
+                                            walletBalance = freshWallet.data.balance
+                                            if (freshWallet.data.balance < fresh.price * safeQuantity) {
+                                                submitting = false
+                                                onShowMessage("Your wallet balance is insufficient for this order.")
+                                                return@launch
+                                            }
+                                        }
+                                    }
+                                }
+
                                 if (paymentMethod == "wallet") {
-                                    when (val res = repository.payOrderWithWallet(item.id, quantity)) {
+                                    when (val res = repository.payOrderWithWallet(item.id, safeQuantity)) {
                                         is ApiResult.Success -> {
                                             submitting = false
                                             onShowMessage("Payment confirmed! Order secured in Escrow.")
@@ -302,7 +379,7 @@ fun CheckoutScreen(
                                         }
                                     }
                                 } else {
-                                    when (val res = repository.createOrderPaystack(item.id, quantity)) {
+                                    when (val res = repository.createOrderPaystack(item.id, safeQuantity)) {
                                         is ApiResult.Success -> {
                                             submitting = false
                                             val (_, authUrl) = res.data

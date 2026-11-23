@@ -67,6 +67,7 @@ import com.example.ui.components.KartPrimaryButton
 import com.example.ui.components.KartSubScreenTopBar
 import com.example.ui.components.KartTextField
 import com.example.ui.theme.KartDanger
+import com.example.ui.theme.KartDangerContainer
 import com.example.ui.theme.KartPrimary
 import com.example.ui.theme.KartSuccess
 import com.example.ui.theme.KartThemeTokens
@@ -550,10 +551,13 @@ fun SettingsDetailScreen(
                     }
                 }
                 "payout" -> item {
-                    var network by remember { mutableStateOf(profile?.momoNetwork ?: "MTN") }
-                    var momoNum by remember { mutableStateOf(profile?.momoNumber.orEmpty()) }
-                    var bankName by remember { mutableStateOf(profile?.bankName.orEmpty()) }
-                    var bankAcc by remember { mutableStateOf(profile?.bankAccountNumber.orEmpty()) }
+                    var network by remember(profile) { mutableStateOf(profile?.momoNetwork ?: "MTN") }
+                    var momoNum by remember(profile) { mutableStateOf(profile?.momoNumber.orEmpty()) }
+                    var bankName by remember(profile) { mutableStateOf(profile?.bankName.orEmpty()) }
+                    var bankAcc by remember(profile) { mutableStateOf(profile?.bankAccountNumber.orEmpty()) }
+                    val cleanMomoDigits = momoNum.filter(Char::isDigit)
+                    val hasValidMomo = cleanMomoDigits.length >= 9
+                    val hasValidBank = bankName.trim().length >= 2 && bankAcc.trim().length >= 6
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text("Mobile Money Network", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -561,18 +565,35 @@ fun SettingsDetailScreen(
                                 KartChip(n, network == n, { network = n })
                             }
                         }
-                        KartTextField(momoNum, { momoNum = it }, "MoMo Number", placeholder = "054 000 0000")
+                        KartTextField(
+                            momoNum,
+                            { momoNum = it },
+                            "MoMo Number",
+                            placeholder = "054 000 0000",
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)
+                        )
                         KartTextField(bankName, { bankName = it }, "Bank Name (Optional)", placeholder = "GCB / Ecobank / Fidelity")
                         KartTextField(bankAcc, { bankAcc = it }, "Bank Account Number (Optional)")
+                        Text(
+                            text = "Provide a valid MoMo number (9+ digits) or both your bank name and account number.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = KartThemeTokens.colors.textSecondary
+                        )
                         KartPrimaryButton(
                             text = "Save Payout Account",
                             loading = loading,
+                            enabled = hasValidMomo || hasValidBank,
                             onClick = {
                                 scope.launch {
                                     loading = true
-                                    val r = repository.updatePayoutSettings(network, momoNum, bankName, bankAcc)
+                                    val r = repository.updatePayoutSettings(network, momoNum.trim(), bankName.trim(), bankAcc.trim())
                                     loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "Payout account saved!" else (r as ApiResult.Error).message)
+                                    if (r is ApiResult.Success) {
+                                        sessionViewModel.refreshUserMetadata()
+                                        onShowMessage("Payout account saved!")
+                                    } else {
+                                        onShowMessage((r as ApiResult.Error).message)
+                                    }
                                 }
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -580,14 +601,66 @@ fun SettingsDetailScreen(
                     }
                 }
                 "delivery-pin" -> item {
+                    var hasExistingPin by remember { mutableStateOf(false) }
+                    var verifyByPassword by remember { mutableStateOf(false) }
+                    var currentPin by remember { mutableStateOf("") }
+                    var currentPassword by remember { mutableStateOf("") }
                     var pin by remember { mutableStateOf("") }
                     var confirmPin by remember { mutableStateOf("") }
+
+                    LaunchedEffect(Unit) {
+                        when (val res = repository.fetchDeliveryPinStatus()) {
+                            is ApiResult.Success -> hasExistingPin = res.data
+                            is ApiResult.Error -> Unit
+                        }
+                    }
+
+                    val hasValidReauth = !hasExistingPin ||
+                        (!verifyByPassword && currentPin.length == 4) ||
+                        (verifyByPassword && currentPassword.length >= 6)
+
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
                             "Your 4-digit Delivery PIN protects your escrow purchases. Enter it only when you have received and inspected your item.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = KartThemeTokens.colors.textSecondary
                         )
+                        if (hasExistingPin) {
+                            Text(
+                                "Verify your identity to change your existing Delivery PIN:",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                KartChip(
+                                    label = "Current PIN",
+                                    selected = !verifyByPassword,
+                                    onClick = { verifyByPassword = false; currentPassword = "" }
+                                )
+                                KartChip(
+                                    label = "Account Password",
+                                    selected = verifyByPassword,
+                                    onClick = { verifyByPassword = true; currentPin = "" }
+                                )
+                            }
+                            if (!verifyByPassword) {
+                                KartTextField(
+                                    currentPin,
+                                    { currentPin = it.filter(Char::isDigit).take(4) },
+                                    "Current 4-Digit Delivery PIN",
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                                )
+                            } else {
+                                KartTextField(
+                                    currentPassword,
+                                    { currentPassword = it },
+                                    "Account Password",
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                                )
+                            }
+                        }
                         KartTextField(
                             pin,
                             { pin = it.filter(Char::isDigit).take(4) },
@@ -603,15 +676,28 @@ fun SettingsDetailScreen(
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
                         )
                         KartPrimaryButton(
-                            text = "Save Delivery PIN",
+                            text = if (hasExistingPin) "Update Delivery PIN" else "Save Delivery PIN",
                             loading = loading,
-                            enabled = pin.length == 4 && pin == confirmPin,
+                            enabled = pin.length == 4 && pin == confirmPin && hasValidReauth,
                             onClick = {
                                 scope.launch {
                                     loading = true
-                                    val r = repository.saveDeliveryPin(pin)
+                                    val r = repository.saveDeliveryPin(
+                                        pin = pin,
+                                        currentPin = if (hasExistingPin && !verifyByPassword) currentPin else null,
+                                        currentPassword = if (hasExistingPin && verifyByPassword) currentPassword else null
+                                    )
                                     loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "Delivery PIN updated!" else (r as ApiResult.Error).message)
+                                    if (r is ApiResult.Success) {
+                                        hasExistingPin = true
+                                        currentPin = ""
+                                        currentPassword = ""
+                                        pin = ""
+                                        confirmPin = ""
+                                        onShowMessage("Delivery PIN updated!")
+                                    } else {
+                                        onShowMessage((r as ApiResult.Error).message)
+                                    }
                                 }
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -676,10 +762,13 @@ fun SettingsDetailScreen(
                 }
                 "language" -> item {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Display Language", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        listOf("English (GH)", "English (UK)", "English (US)", "French").forEach { lang ->
-                            KartChip(label = lang, selected = langPref == lang, onClick = { sessionViewModel.setLanguage(lang) })
-                        }
+                        Text("Display Language & Region", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        KartChip(label = "English (GH • ₵ GHS)", selected = true, onClick = { sessionViewModel.setLanguage("English (GH)") })
+                        Text(
+                            text = "Kart currently displays in English (Ghana • ₵ GHS). Additional campus languages are coming soon.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = KartThemeTokens.colors.textSecondary
+                        )
                     }
                 }
                 "notifications" -> item {
@@ -742,6 +831,7 @@ fun SettingsDetailScreen(
 @Composable
 fun IdentityVerificationScreen(
     profile: Profile?,
+    sessionViewModel: SessionViewModel,
     repository: KartRepository,
     onBack: () -> Unit,
     onShowMessage: (String) -> Unit
@@ -755,9 +845,15 @@ fun IdentityVerificationScreen(
     var idPhotoUri by remember { mutableStateOf<Uri?>(null) }
     var selfieUri by remember { mutableStateOf<Uri?>(null) }
     var submitting by remember { mutableStateOf(false) }
-    var submitted by remember { mutableStateOf(profile?.verificationStatus.equals("Pending", true)) }
+    var submitted by remember(profile?.verificationStatus) {
+        mutableStateOf(profile?.verificationStatus.equals("Pending", true))
+    }
 
     var activeCameraTarget by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        sessionViewModel.refreshUserMetadata()
+    }
 
     val idPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) idPhotoUri = uri
@@ -769,6 +865,10 @@ fun IdentityVerificationScreen(
     fun requestCamera(target: String) {
         activeCameraTarget = target
     }
+
+    val step1Complete = studentIdNum.trim().length >= 4 && idPhotoUri != null
+    val step2Complete = step1Complete && selfieUri != null
+    val isRejected = profile?.verificationStatus.equals("Rejected", true)
 
     Column(
         modifier = Modifier
@@ -809,10 +909,45 @@ fun IdentityVerificationScreen(
             contentPadding = PaddingValues(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            if (isRejected) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = KartDangerContainer),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(14.dp)) {
+                            Text(
+                                text = "Previous Verification Not Approved",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = KartDanger
+                            )
+                            Text(
+                                text = profile?.verificationRejectionReason?.takeIf { it.isNotBlank() }
+                                    ?: "Please resubmit a clear, readable photo of your ID and a well-lit selfie.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = KartDanger
+                            )
+                        }
+                    }
+                }
+            }
+
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("1. ID Card", "2. Selfie", "3. Review").forEachIndexed { idx, label ->
-                        KartChip(label = label, selected = step == idx, onClick = { step = idx })
+                        KartChip(
+                            label = label,
+                            selected = step == idx,
+                            onClick = {
+                                when (idx) {
+                                    0 -> step = 0
+                                    1 -> if (step1Complete) step = 1 else onShowMessage("Enter your ID number (4+ chars) and attach your ID photo first.")
+                                    2 -> if (step2Complete) step = 2 else onShowMessage("Complete both ID and selfie capture before reviewing.")
+                                }
+                            }
+                        )
                     }
                 }
             }
@@ -822,7 +957,7 @@ fun IdentityVerificationScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         Text("Step 1: Upload ID", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                         Text("Take or select a clear photo of your valid government or institutional ID card.", style = MaterialTheme.typography.bodyMedium, color = tokens.textSecondary)
-                        KartTextField(studentIdNum, { studentIdNum = it }, "ID Number", placeholder = "e.g. GHA-10948271-0")
+                        KartTextField(studentIdNum, { studentIdNum = it }, "ID Number (min 4 chars)", placeholder = "e.g. GHA-10948271-0")
                         if (idPhotoUri != null) {
                             AsyncImage(
                                 model = idPhotoUri,
@@ -850,7 +985,7 @@ fun IdentityVerificationScreen(
                         }
                         KartPrimaryButton(
                             text = "Continue to Face Capture",
-                            enabled = idPhotoUri != null && studentIdNum.isNotBlank(),
+                            enabled = step1Complete,
                             onClick = { step = 1 },
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -901,7 +1036,7 @@ fun IdentityVerificationScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(KartLucideIcons.CheckCircle, contentDescription = null, tint = KartSuccess)
                                     Spacer(Modifier.width(8.dp))
-                                    Text("ID #: $studentIdNum", fontWeight = FontWeight.Bold)
+                                    Text("ID #: ${studentIdNum.trim()}", fontWeight = FontWeight.Bold)
                                 }
                                 Text("ID Document: ${if (idPhotoUri != null) "Attached" else "Missing"}", style = MaterialTheme.typography.bodySmall)
                                 Text("Selfie Capture: ${if (selfieUri != null) "Attached" else "Missing"}", style = MaterialTheme.typography.bodySmall)
@@ -960,12 +1095,26 @@ fun IdentityVerificationScreen(
                         KartPrimaryButton(
                             text = "Submit Verification",
                             loading = submitting,
-                            enabled = idPhotoUri != null && selfieUri != null,
+                            enabled = step2Complete,
                             onClick = {
                                 scope.launch {
                                     submitting = true
-                                    val idUp = repository.uploadImageUri(context.contentResolver, idPhotoUri!!, bucket = "profiles")
-                                    val selfieUp = repository.uploadImageUri(context.contentResolver, selfieUri!!, bucket = "profiles")
+                                    val idUp = repository.uploadImageUri(
+                                        context.contentResolver,
+                                        idPhotoUri!!,
+                                        bucket = "verifications",
+                                        isPrivate = true
+                                    )
+                                    val selfieUp = if (idUp is ApiResult.Success) {
+                                        repository.uploadImageUri(
+                                            context.contentResolver,
+                                            selfieUri!!,
+                                            bucket = "verifications",
+                                            isPrivate = true
+                                        )
+                                    } else {
+                                        ApiResult.Error((idUp as ApiResult.Error).message)
+                                    }
                                     if (idUp is ApiResult.Success && selfieUp is ApiResult.Success) {
                                         when (val res = repository.submitKycVerification(
                                             idImageUrl = idUp.data,
@@ -977,6 +1126,7 @@ fun IdentityVerificationScreen(
                                             is ApiResult.Success -> {
                                                 submitting = false
                                                 submitted = true
+                                                sessionViewModel.refreshUserMetadata()
                                                 onShowMessage("Verification submitted!")
                                             }
                                             is ApiResult.Error -> {

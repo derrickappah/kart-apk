@@ -261,15 +261,17 @@ fun LoginScreen(
 @Composable
 fun SignUpScreen(
     sessionViewModel: SessionViewModel,
+    campuses: List<String> = KartGhanaCampuses,
     onSignedUp: (signedInImmediately: Boolean) -> Unit,
     onNavigateLogin: () -> Unit
 ) {
     val state by sessionViewModel.uiState.collectAsStateWithLifecycle()
     val tokens = KartThemeTokens.colors
+    val availableCampuses = campuses.ifEmpty { KartGhanaCampuses }
     var fullName by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
-    var campus by remember { mutableStateOf(KartGhanaCampuses.first()) }
+    var campus by remember(availableCampuses) { mutableStateOf(availableCampuses.first()) }
     var password by remember { mutableStateOf("") }
     var localError by remember { mutableStateOf<String?>(null) }
 
@@ -352,7 +354,7 @@ fun SignUpScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    KartGhanaCampuses.take(6).forEach { c ->
+                    availableCampuses.forEach { c ->
                         KartChip(label = c, selected = campus == c, onClick = { campus = c })
                     }
                 }

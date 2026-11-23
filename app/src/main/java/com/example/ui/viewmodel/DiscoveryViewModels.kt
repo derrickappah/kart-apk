@@ -184,10 +184,29 @@ class ProductDetailViewModel(private val repository: KartRepository) : ViewModel
         }
     }
 
-    fun submitReview(productId: String, sellerId: String?, rating: Int, comment: String, currentUserId: String?) {
+    fun submitReview(
+        productId: String,
+        sellerId: String?,
+        rating: Int,
+        comment: String,
+        currentUserId: String?,
+        orderId: String? = null
+    ) {
+        val currentBundle = _uiState.value.bundle
+        val verifiedOrderId = orderId ?: currentBundle?.verifiedBuyerOrderId
+        if (currentBundle?.hasUserReviewed == true) {
+            _uiState.update { it.copy(feedbackMessage = "You have already reviewed this listing.") }
+            return
+        }
+        if (verifiedOrderId.isNullOrBlank()) {
+            _uiState.update {
+                it.copy(feedbackMessage = "Only verified buyers with completed orders can review this item.")
+            }
+            return
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
-            when (val res = repository.submitReview(productId, sellerId, null, rating, comment)) {
+            when (val res = repository.submitReview(productId, sellerId, verifiedOrderId, rating, comment)) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(actionLoading = false, feedbackMessage = "Review published!") }
                     loadProduct(productId, currentUserId)

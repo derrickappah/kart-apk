@@ -52,6 +52,43 @@ object KartNotificationHelper {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    internal fun sanitizeNotificationDeepLinkString(deepLink: String?, channelId: String): String {
+        val fallback = if (channelId == CHANNEL_MESSAGES) {
+            "https://www.kart.cx/messages"
+        } else {
+            "https://www.kart.cx/notifications"
+        }
+        val raw = deepLink?.trim().orEmpty()
+        if (raw.isBlank()) return fallback
+        val candidate = if (raw.startsWith("http://", true) || raw.startsWith("https://", true) || raw.contains("://")) {
+            raw
+        } else {
+            "https://www.kart.cx/${raw.trimStart('/')}"
+        }
+        val parsed = runCatching { java.net.URI(candidate) }.getOrNull() ?: return fallback
+
+        val scheme = parsed.scheme?.lowercase().orEmpty()
+        val host = parsed.host?.lowercase().orEmpty()
+        val hasUserInfo = !parsed.userInfo.isNullOrBlank()
+        val isTrustedHost = scheme == "https" && !hasUserInfo && host in setOf("www.kart.cx", "kart.cx")
+        if (!isTrustedHost) return fallback
+
+        // Never allow notifications to trigger auth callbacks or payment verification links
+        val path = parsed.path.orEmpty().lowercase()
+        val query = parsed.rawQuery.orEmpty().lowercase()
+        if (path.contains("auth-callback") ||
+            path.contains("auth-tokens") ||
+            path.contains("checkout-success") ||
+            query.contains("refresh_token=")
+        ) {
+            return fallback
+        }
+        return candidate
+    }
+
+    internal fun sanitizeNotificationDeepLink(deepLink: String?, channelId: String): Uri =
+        Uri.parse(sanitizeNotificationDeepLinkString(deepLink, channelId))
+
     fun showNotification(
         context: Context,
         notificationId: Int,
@@ -66,18 +103,7 @@ object KartNotificationHelper {
         val intent = Intent(context, MainActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            if (!deepLink.isNullOrBlank()) {
-                data = if (deepLink.startsWith("http") || deepLink.startsWith("kart-app://")) {
-                    Uri.parse(deepLink)
-                } else {
-                    Uri.parse("https://www.kart.cx/${deepLink.trimStart('/')}")
-                }
-            } else {
-                data = Uri.parse(
-                    if (channelId == CHANNEL_MESSAGES) "https://www.kart.cx/messages"
-                    else "https://www.kart.cx/notifications"
-                )
-            }
+            data = sanitizeNotificationDeepLink(deepLink, channelId)
         }
 
         val pendingIntent = PendingIntent.getActivity(

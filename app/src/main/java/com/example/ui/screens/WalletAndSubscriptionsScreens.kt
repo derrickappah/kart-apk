@@ -26,11 +26,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -49,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.model.EmptyStateAsset
 import com.example.domain.model.KartFormatters
+import com.example.domain.model.Profile
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.KartChip
 import com.example.ui.components.KartLucideIcons
@@ -209,17 +212,19 @@ fun WalletScreen(
                     }
                 } else {
                     items(txns, key = { it.id }) { txn ->
-                        val isDebitType = txn.type.equals("debit", true) ||
-                            txn.type.equals("withdrawal", true) ||
-                            txn.type.equals("purchase", true) ||
-                            txn.type.equals("payment", true)
-                        val isCredit = !isDebitType && (
-                            txn.type.equals("credit", true) ||
-                                txn.type.equals("deposit", true) ||
-                                txn.type.equals("refund", true) ||
-                                txn.type.equals("payout", true) ||
-                                txn.amount > 0
-                            )
+                        val typeLower = txn.type?.lowercase().orEmpty()
+                        val isDebitType = typeLower in setOf(
+                            "debit", "withdrawal", "purchase", "payment",
+                            "fee", "escrow_hold", "subscription", "promotion", "charge"
+                        )
+                        val isCreditType = typeLower in setOf(
+                            "credit", "deposit", "refund", "payout", "escrow_release", "bonus"
+                        )
+                        val isCredit = when {
+                            isDebitType -> false
+                            isCreditType -> true
+                            else -> txn.amount >= 0
+                        }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -282,6 +287,13 @@ fun DepositFundsScreen(
     var amountText by remember { mutableStateOf("") }
     val presets = listOf("20", "50", "100", "250", "500")
 
+    LaunchedEffect(state.feedback) {
+        state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
+    }
+
+    val amountVal = amountText.toDoubleOrNull() ?: 0.0
+    val isValidAmount = amountVal in 5.0..50_000.0
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -292,7 +304,11 @@ fun DepositFundsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.padding(20.dp)
         ) {
-            Text("Top up your Kart Wallet via Mobile Money or Card.", style = MaterialTheme.typography.bodyMedium, color = KartThemeTokens.colors.textSecondary)
+            Text(
+                "Top up your Kart Wallet via Mobile Money or Card. Minimum ₵5.00, maximum ₵50,000.00.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = KartThemeTokens.colors.textSecondary
+            )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 presets.forEach { preset ->
                     KartChip(label = "₵ $preset", selected = amountText == preset, onClick = { amountText = preset })
@@ -300,7 +316,7 @@ fun DepositFundsScreen(
             }
             KartTextField(
                 value = amountText,
-                onValueChange = { amountText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                onValueChange = { amountText = KartFormatters.sanitizeDecimalInput(it) },
                 label = "Amount (₵ GHS)",
                 placeholder = "100.00",
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
@@ -308,7 +324,7 @@ fun DepositFundsScreen(
             KartPrimaryButton(
                 text = "Continue to Paystack",
                 loading = state.actionLoading,
-                enabled = (amountText.toDoubleOrNull() ?: 0.0) >= 5.0,
+                enabled = isValidAmount,
                 onClick = {
                     val amt = amountText.toDoubleOrNull() ?: return@KartPrimaryButton
                     viewModel.initiateDeposit(amt) { authUrl ->
@@ -326,15 +342,39 @@ fun DepositFundsScreen(
 @Composable
 fun WithdrawFundsScreen(
     userId: String,
+    profile: Profile? = null,
     viewModel: WalletViewModel,
     onBack: () -> Unit,
     onShowMessage: (String) -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val defaultMethod = remember(profile) {
+        when (profile?.momoNetwork?.uppercase()) {
+            "TELECEL" -> "Telecel Cash"
+            "AT" -> "AT Money"
+            else -> if (!profile?.momoNumber.isNullOrBlank()) "MTN Mobile Money"
+            else if (!profile?.bankAccountNumber.isNullOrBlank()) "Bank Transfer"
+            else "MTN Mobile Money"
+        }
+    }
+    val defaultDetails = remember(profile) {
+        when {
+            !profile?.momoNumber.isNullOrBlank() -> listOfNotNull(profile?.momoNumber, profile?.resolvedName).joinToString(" - ")
+            !profile?.bankAccountNumber.isNullOrBlank() -> listOfNotNull(profile?.bankName, profile?.bankAccountNumber, profile?.resolvedName).joinToString(" - ")
+            else -> ""
+        }
+    }
     var amountText by remember { mutableStateOf("") }
-    var method by remember { mutableStateOf("MTN Mobile Money") }
-    var accountDetails by remember { mutableStateOf("") }
+    var method by remember(defaultMethod) { mutableStateOf(defaultMethod) }
+    var accountDetails by remember(defaultDetails) { mutableStateOf(defaultDetails) }
     val methods = listOf("MTN Mobile Money", "Telecel Cash", "AT Money", "Bank Transfer")
+
+    LaunchedEffect(userId) {
+        if (userId.isNotBlank()) viewModel.loadWallet(userId)
+    }
+    LaunchedEffect(state.feedback) {
+        state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
+    }
 
     Column(
         modifier = Modifier
@@ -352,12 +392,17 @@ fun WithdrawFundsScreen(
                 fontWeight = FontWeight.Bold,
                 color = KartPrimary
             )
+            Text(
+                "Minimum withdrawal amount is ₵10.00.",
+                style = MaterialTheme.typography.bodySmall,
+                color = KartThemeTokens.colors.textSecondary
+            )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 methods.forEach { m -> KartChip(label = m, selected = method == m, onClick = { method = m }) }
             }
             KartTextField(
                 value = amountText,
-                onValueChange = { amountText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                onValueChange = { amountText = KartFormatters.sanitizeDecimalInput(it) },
                 label = "Withdrawal Amount (₵ GHS)",
                 placeholder = "50.00",
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
@@ -372,7 +417,7 @@ fun WithdrawFundsScreen(
             KartPrimaryButton(
                 text = "Request Withdrawal",
                 loading = state.actionLoading,
-                enabled = withdrawAmount > 0.0 && withdrawAmount <= state.wallet.balance && accountDetails.isNotBlank(),
+                enabled = withdrawAmount >= 10.0 && withdrawAmount <= state.wallet.balance && accountDetails.trim().length >= 8,
                 onClick = {
                     val amt = amountText.toDoubleOrNull() ?: return@KartPrimaryButton
                     viewModel.withdraw(amt, method, accountDetails.trim(), userId) {
@@ -395,11 +440,14 @@ fun SubscriptionsScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val tokens = KartThemeTokens.colors
+    var pendingCancelSubId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(userId) { viewModel.loadSubscriptions(userId) }
     LaunchedEffect(state.feedback) {
         state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
     }
+
+    val activeSub = state.activeSubscription?.takeIf { KartFormatters.isActiveSubscription(it) }
 
     Column(
         modifier = Modifier
@@ -413,7 +461,7 @@ fun SubscriptionsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            state.activeSubscription?.let { sub ->
+            activeSub?.let { sub ->
                 item {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = KartSuccessContainer.copy(alpha = 0.6f)),
@@ -426,15 +474,16 @@ fun SubscriptionsScreen(
                                 Spacer(Modifier.width(8.dp))
                                 Text("Active Plan: ${sub.plan?.name ?: "Kart Seller"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             }
-                            Text("Status: ${sub.status ?: "Active"}", style = MaterialTheme.typography.bodySmall)
-                            if (sub.status.equals("Active", true)) {
-                                KartOutlineButton(
-                                    text = "Cancel Subscription",
-                                    borderColor = KartDanger,
-                                    contentColor = KartDanger,
-                                    onClick = { viewModel.cancelSubscription(sub.id, userId) }
-                                )
-                            }
+                            Text(
+                                text = "Status: Active" + (sub.endDate?.take(10)?.let { " • Renews/Ends $it" }.orEmpty()),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            KartOutlineButton(
+                                text = "Cancel Subscription",
+                                borderColor = KartDanger,
+                                contentColor = KartDanger,
+                                onClick = { pendingCancelSubId = sub.id }
+                            )
                         }
                     }
                 }
@@ -444,6 +493,7 @@ fun SubscriptionsScreen(
                 items(2) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(150.dp)) }
             } else {
                 items(state.plans, key = { it.id }) { plan ->
+                    val isCurrentActivePlan = activeSub?.planId == plan.id
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         shape = RoundedCornerShape(18.dp),
@@ -474,8 +524,13 @@ fun SubscriptionsScreen(
                                 }
                             }
                             KartPrimaryButton(
-                                text = if (plan.price <= 0) "Activate Plan" else "Subscribe Now",
+                                text = when {
+                                    isCurrentActivePlan -> "Current Active Plan"
+                                    plan.price <= 0 -> "Activate Plan"
+                                    else -> "Subscribe Now"
+                                },
                                 loading = state.actionLoading,
+                                enabled = !isCurrentActivePlan,
                                 onClick = {
                                     viewModel.subscribe(plan.id) { url ->
                                         if (url.isNotBlank()) {
@@ -493,5 +548,28 @@ fun SubscriptionsScreen(
                 }
             }
         }
+    }
+
+    pendingCancelSubId?.let { subId ->
+        AlertDialog(
+            onDismissRequest = { pendingCancelSubId = null },
+            title = { Text("Cancel Subscription?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("Are you sure you want to cancel your active seller subscription? You may lose access to higher listing limits once cancelled.")
+            },
+            confirmButton = {
+                KartPrimaryButton(
+                    text = "Cancel Plan",
+                    containerColor = KartDanger,
+                    onClick = {
+                        pendingCancelSubId = null
+                        viewModel.cancelSubscription(subId, userId)
+                    }
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingCancelSubId = null }) { Text("Keep Plan") }
+            }
+        )
     }
 }

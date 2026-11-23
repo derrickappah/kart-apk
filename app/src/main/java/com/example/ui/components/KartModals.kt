@@ -91,9 +91,10 @@ fun DeliveryVerificationDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+                val requiredLen = if (mode == "pin") 4 else 6
                 KartTextField(
                     value = code,
-                    onValueChange = { code = it.filter(Char::isDigit).take(6) },
+                    onValueChange = { code = it.filter(Char::isDigit).take(requiredLen) },
                     label = if (mode == "pin") "4-Digit Delivery PIN" else "6-Digit Verification OTP",
                     placeholder = if (mode == "pin") "••••" else "123456",
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
@@ -101,10 +102,11 @@ fun DeliveryVerificationDialog(
             }
         },
         confirmButton = {
+            val requiredLen = if (mode == "pin") 4 else 6
             KartPrimaryButton(
                 text = "Release Escrow",
                 loading = isSubmitting,
-                enabled = code.length >= 4,
+                enabled = code.length == requiredLen,
                 onClick = { onConfirm(code, mode) }
             )
         },
@@ -274,12 +276,16 @@ fun ReviewSubmissionDialog(
             }
         },
         confirmButton = {
+            val cleanComment = comment
+                .replace(Regex("""\[Tags:[^\]]*\]""", RegexOption.IGNORE_CASE), "")
+                .trim()
             KartPrimaryButton(
                 text = "Publish Review",
                 loading = isSubmitting,
+                enabled = cleanComment.isNotEmpty() || selectedTags.isNotEmpty(),
                 onClick = {
                     val tagPrefix = if (selectedTags.isNotEmpty()) "[Tags: ${selectedTags.joinToString(", ")}] " else ""
-                    onSubmit(rating, (tagPrefix + comment.trim()).trim())
+                    onSubmit(rating, (tagPrefix + cleanComment).trim())
                 }
             )
         },

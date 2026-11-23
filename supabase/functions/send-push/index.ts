@@ -125,21 +125,43 @@ Deno.serve(async (req: Request) => {
         .single();
       if (conv) {
         if (conv.buyer_id && conv.seller_id) {
-          userId = conv.buyer_id === senderId ? conv.seller_id : conv.buyer_id;
-        } else if (Array.isArray(conv.participants)) {
+          if (senderId === conv.buyer_id) {
+            userId = conv.seller_id;
+          } else if (senderId === conv.seller_id) {
+            userId = conv.buyer_id;
+          } else {
+            userId = undefined;
+          }
+        } else if (Array.isArray(conv.participants) && conv.participants.includes(senderId)) {
           userId = conv.participants.find((p: string) => p !== senderId);
         }
       }
       title = "New message on Kart";
-      body = (payload.record.content ?? "").startsWith("[IMAGE:")
+      const rawContent = String(payload.record.content ?? "").trim();
+      body = rawContent.startsWith("[IMAGE:")
         ? "Sent you a photo"
-        : (payload.record.content ?? "You have a new message");
+        : rawContent.startsWith("[VOICE:")
+        ? "Sent you a voice message"
+        : (rawContent.slice(0, 180) || "You have a new message");
       type = "message";
       deepLink = `/messages/${convId}`;
     }
 
     if (!userId || !body) {
       return new Response(JSON.stringify({ skipped: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // Respect banned status and notification opt-outs
+    const { data: recipientProfile } = await supabase
+      .from("profiles")
+      .select("banned, push_notifications_enabled")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (recipientProfile?.banned === true || recipientProfile?.push_notifications_enabled === false) {
+      return new Response(JSON.stringify({ skipped: true, reason: "recipient_ineligible" }), {
         headers: { "Content-Type": "application/json" },
       });
     }

@@ -239,31 +239,27 @@ fun ProfileScreen(
                                 }
                             }
 
-                            // Social Links (Kart bundled social icons)
+                            // Social Links (Kart bundled social icons — sanitized to prevent arbitrary URI launch)
                             val resolvedWhatsapp = profile.whatsappNumber?.takeIf { it.isNotBlank() } ?: profile.phone
-                            val hasSocials = !profile.instagramUrl.isNullOrBlank() ||
-                                !profile.snapchatUrl.isNullOrBlank() ||
-                                !resolvedWhatsapp.isNullOrBlank()
+                            val safeInstagramUrl = KartFormatters.sanitizeSocialUrl(profile.instagramUrl, "instagram")
+                            val safeSnapchatUrl = KartFormatters.sanitizeSocialUrl(profile.snapchatUrl, "snapchat")
+                            val safeWhatsappUrl = KartFormatters.sanitizeSocialUrl(resolvedWhatsapp, "whatsapp")
+                            val hasSocials = safeInstagramUrl != null || safeSnapchatUrl != null || safeWhatsappUrl != null
                             if (hasSocials) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    if (!profile.instagramUrl.isNullOrBlank()) {
+                                    safeInstagramUrl?.let { url ->
                                         SocialIconButton(R.drawable.ic_social_instagram, "Instagram") {
-                                            val url = if (profile.instagramUrl.startsWith("http")) profile.instagramUrl
-                                            else "https://instagram.com/${profile.instagramUrl.removePrefix("@")}"
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                                         }
                                     }
-                                    if (!profile.snapchatUrl.isNullOrBlank()) {
+                                    safeSnapchatUrl?.let { url ->
                                         SocialIconButton(R.drawable.ic_social_snapchat, "Snapchat") {
-                                            val url = if (profile.snapchatUrl.startsWith("http")) profile.snapchatUrl
-                                            else "https://snapchat.com/add/${profile.snapchatUrl.removePrefix("@")}"
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                                         }
                                     }
-                                    if (!resolvedWhatsapp.isNullOrBlank()) {
+                                    safeWhatsappUrl?.let { url ->
                                         SocialIconButton(R.drawable.ic_social_whatsapp, "WhatsApp") {
-                                            val digits = resolvedWhatsapp.filter(Char::isDigit)
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$digits")))
+                                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                                         }
                                     }
                                 }
@@ -273,7 +269,10 @@ fun ProfileScreen(
                                 if (bundle.isFollowing) {
                                     KartSecondaryButton(
                                         text = "Following",
-                                        onClick = { viewModel.toggleFollow(resolvedId) },
+                                        onClick = {
+                                            if (currentUserId == null) onRequireAuth()
+                                            else viewModel.toggleFollow(resolvedId, currentUserId)
+                                        },
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 } else {
@@ -281,7 +280,7 @@ fun ProfileScreen(
                                         text = "Follow Seller",
                                         onClick = {
                                             if (currentUserId == null) onRequireAuth()
-                                            else viewModel.toggleFollow(resolvedId)
+                                            else viewModel.toggleFollow(resolvedId, currentUserId)
                                         },
                                         modifier = Modifier.fillMaxWidth()
                                     )
@@ -472,6 +471,7 @@ private fun DashboardQuickTile(
 fun EditProfileScreen(
     userId: String,
     initialProfile: Profile?,
+    campuses: List<String> = KartGhanaCampuses,
     viewModel: ProfileViewModel,
     onBack: () -> Unit,
     onSaved: () -> Unit,
@@ -479,16 +479,17 @@ fun EditProfileScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val availableCampuses = campuses.ifEmpty { KartGhanaCampuses }
     var displayName by remember(initialProfile) { mutableStateOf(initialProfile?.displayName.orEmpty()) }
     var username by remember(initialProfile) { mutableStateOf(initialProfile?.username.orEmpty()) }
     var bio by remember(initialProfile) { mutableStateOf(initialProfile?.bio.orEmpty()) }
-    var campus by remember(initialProfile) { mutableStateOf(initialProfile?.campus ?: KartGhanaCampuses.first()) }
+    var campus by remember(initialProfile, availableCampuses) {
+        mutableStateOf(initialProfile?.campus ?: availableCampuses.first())
+    }
     var phone by remember(initialProfile) { mutableStateOf(initialProfile?.phone.orEmpty()) }
     var instagram by remember(initialProfile) { mutableStateOf(initialProfile?.instagramUrl.orEmpty()) }
     var snapchat by remember(initialProfile) { mutableStateOf(initialProfile?.snapchatUrl.orEmpty()) }
-    var whatsapp by remember(initialProfile) {
-        mutableStateOf((initialProfile?.whatsappNumber?.takeIf { it.isNotBlank() } ?: initialProfile?.phone).orEmpty())
-    }
+    var whatsapp by remember(initialProfile) { mutableStateOf(initialProfile?.whatsappNumber.orEmpty()) }
     var avatarUrl by remember(initialProfile) { mutableStateOf(initialProfile?.avatarUrl) }
     var showAvatarSheet by remember { mutableStateOf(false) }
     var pendingCropUri by remember { mutableStateOf<Uri?>(null) }
@@ -542,16 +543,25 @@ fun EditProfileScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Campus", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        KartGhanaCampuses.take(6).forEach { c ->
+                        availableCampuses.forEach { c ->
                             KartChip(c, campus == c, { campus = c })
                         }
                     }
                 }
             }
-            item { KartTextField(phone, { phone = it }, "Phone Number", placeholder = "+233500000000") }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    KartTextField(phone, { phone = it }, "Phone Number", placeholder = "+233500000000")
+                    Text(
+                        text = "Changing your phone number requires re-verification in Settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = KartThemeTokens.colors.textSecondary
+                    )
+                }
+            }
             item { KartTextField(instagram, { instagram = it }, "Instagram Handle / URL", placeholder = "@yourhandle") }
             item { KartTextField(snapchat, { snapchat = it }, "Snapchat Username", placeholder = "your_snap") }
-            item { KartTextField(whatsapp, { whatsapp = it }, "WhatsApp Number", placeholder = "+233500000000") }
+            item { KartTextField(whatsapp, { whatsapp = it }, "WhatsApp Number (Optional)", placeholder = "+233500000000") }
 
             item {
                 KartPrimaryButton(
@@ -611,7 +621,7 @@ fun WishlistScreen(
     ) {
         KartSubScreenTopBar(title = "Saved Wishlist", onBack = onBack)
 
-        val products = state.wishlist.mapNotNull { it.product }.filter { it.id in wishlistIds || wishlistIds.isEmpty() }
+        val products = state.wishlist.mapNotNull { it.product }.filter { it.id in wishlistIds }
         when {
             state.loading -> {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(20.dp)) {

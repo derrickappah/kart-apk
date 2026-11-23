@@ -79,12 +79,16 @@ interface SupabaseApi {
     @PATCH("rest/v1/products")
     suspend fun updateProduct(
         @Query("id") idFilter: String,
+        @Query("seller_id") sellerIdFilter: String? = null,
         @Header("Prefer") prefer: String = "return=representation",
         @Body body: Map<String, @JvmSuppressWildcards Any?>
     ): Response<List<Product>>
 
     @DELETE("rest/v1/products")
-    suspend fun deleteProduct(@Query("id") idFilter: String): Response<Unit>
+    suspend fun deleteProduct(
+        @Query("id") idFilter: String,
+        @Query("seller_id") sellerIdFilter: String? = null
+    ): Response<Unit>
 
     @GET("rest/v1/advertisements")
     suspend fun getAdvertisements(
@@ -136,6 +140,12 @@ interface SupabaseApi {
         @Header("Prefer") prefer: String = "return=representation",
         @Body body: Map<String, @JvmSuppressWildcards Any?>
     ): Response<List<ConversationRow>>
+
+    @PATCH("rest/v1/conversations")
+    suspend fun updateConversation(
+        @Query("id") idFilter: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<Unit>
 
     @GET("rest/v1/messages")
     suspend fun getMessages(@QueryMap params: Map<String, String>): Response<List<MessageRow>>
@@ -190,17 +200,29 @@ interface SupabaseApi {
         @Body body: Map<String, @JvmSuppressWildcards Any?>
     ): Response<Unit>
 
+    @POST("rest/v1/rpc/delete_device_token")
+    suspend fun deleteDeviceTokenRpc(
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<Unit>
+
     @DELETE("rest/v1/device_tokens")
     suspend fun deleteDeviceToken(
         @Query("fcm_token") fcmTokenFilter: String
     ): Response<Unit>
 
-    // --- Storage Upload ---
+    // --- Storage Upload & Signed URLs ---
     @POST("storage/v1/object/{bucket}/{path}")
     suspend fun uploadToStorage(
         @Path("bucket") bucket: String,
         @Path("path", encoded = true) path: String,
         @Header("x-upsert") upsert: String = "true",
         @Body body: RequestBody
+    ): Response<Map<String, Any>>
+
+    @POST("storage/v1/object/sign/{bucket}/{path}")
+    suspend fun createSignedStorageUrl(
+        @Path("bucket") bucket: String,
+        @Path("path", encoded = true) path: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any> = mapOf("expiresIn" to 604800)
     ): Response<Map<String, Any>>
 }

@@ -10,6 +10,7 @@ import com.example.data.repository.SellerHubBundle
 import com.example.domain.model.EnrichedConversation
 import com.example.domain.model.MessageRow
 import com.example.domain.model.Order
+import com.example.domain.model.Product
 import com.example.domain.model.SubscriptionPlan
 import com.example.domain.model.UserSubscription
 import com.example.domain.model.Wallet
@@ -23,6 +24,8 @@ data class OrdersUiState(
     val loading: Boolean = true,
     val orders: List<Order> = emptyList(),
     val selectedOrder: Order? = null,
+    val hasPendingRefund: Boolean = false,
+    val hasReviewedOrder: Boolean = false,
     val actionLoading: Boolean = false,
     val error: String? = null,
     val feedback: String? = null
@@ -58,12 +61,21 @@ class OrdersViewModel(private val repository: KartRepository) : ViewModel() {
             it.copy(
                 loading = true,
                 selectedOrder = if (isDifferentOrder) null else it.selectedOrder,
+                hasPendingRefund = if (isDifferentOrder) false else it.hasPendingRefund,
+                hasReviewedOrder = if (isDifferentOrder) false else it.hasReviewedOrder,
                 error = null
             )
         }
         viewModelScope.launch {
-            when (val res = repository.fetchOrderById(orderId)) {
-                is ApiResult.Success -> _uiState.update { it.copy(loading = false, selectedOrder = res.data) }
+            when (val res = repository.fetchOrderDetail(orderId)) {
+                is ApiResult.Success -> _uiState.update {
+                    it.copy(
+                        loading = false,
+                        selectedOrder = res.data.order,
+                        hasPendingRefund = res.data.hasPendingRefund,
+                        hasReviewedOrder = res.data.hasReviewed
+                    )
+                }
                 is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = res.message) }
             }
         }
@@ -123,7 +135,14 @@ class OrdersViewModel(private val repository: KartRepository) : ViewModel() {
             _uiState.update { it.copy(actionLoading = true) }
             when (val res = repository.submitReview(order.productId, order.sellerId, order.id, rating, comment)) {
                 is ApiResult.Success -> {
-                    _uiState.update { it.copy(actionLoading = false) }
+                    _uiState.update {
+                        it.copy(
+                            actionLoading = false,
+                            hasReviewedOrder = true,
+                            feedback = "Thanks for reviewing your order!"
+                        )
+                    }
+                    loadOrderDetail(order.id)
                     onSuccess()
                 }
                 is ApiResult.Error -> _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
@@ -251,13 +270,27 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
     }
 
     fun sendMessage(conversationId: String, senderId: String, text: String) {
-        if (text.isBlank()) return
+        sendMessageInternal(conversationId, senderId, text, allowMediaMarker = false)
+    }
+
+    private fun sendMessageInternal(
+        conversationId: String,
+        senderId: String,
+        text: String,
+        allowMediaMarker: Boolean
+    ) {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return
+        if (trimmed.length > 2000) {
+            _uiState.update { it.copy(sending = false, feedback = "Message is too long (maximum 2,000 characters).") }
+            return
+        }
         val localId = "local_${java.util.UUID.randomUUID()}"
         val optimistic = MessageRow(
             id = localId,
             conversationId = conversationId,
             senderId = senderId,
-            content = text,
+            content = trimmed,
             createdAt = java.time.Instant.now().toString(),
             isRead = false
         )
@@ -265,7 +298,7 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
         bumpConversationToTop(conversationId, optimistic)
 
         viewModelScope.launch {
-            when (val res = repository.sendMessage(conversationId, senderId, text)) {
+            when (val res = repository.sendMessage(conversationId, senderId, trimmed, allowMediaMarker = allowMediaMarker)) {
                 is ApiResult.Success -> {
                     val serverMsg = res.data
                     val cached = messagesCache[conversationId].orEmpty()
@@ -296,9 +329,9 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
     fun sendImageMessage(conversationId: String, senderId: String, resolver: ContentResolver, uri: Uri) {
         viewModelScope.launch {
             _uiState.update { it.copy(sending = true) }
-            when (val upload = repository.uploadImageUri(resolver, uri, bucket = "products")) {
+            when (val upload = repository.uploadImageUri(resolver, uri, bucket = "chat-media", isPrivate = true)) {
                 is ApiResult.Success -> {
-                    sendMessage(conversationId, senderId, "[IMAGE:${upload.data}]")
+                    sendMessageInternal(conversationId, senderId, "[IMAGE:${upload.data}]", allowMediaMarker = true)
                 }
                 is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
             }
@@ -309,9 +342,15 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(sending = true) }
             try {
-                when (val upload = repository.uploadAudioFile(audioFile, bucket = "products")) {
+                when (val upload = repository.uploadAudioFile(audioFile, bucket = "chat-media", isPrivate = true)) {
                     is ApiResult.Success -> {
-                        sendMessage(conversationId, senderId, "[VOICE:${upload.data}|${durationSeconds.coerceAtLeast(1)}]")
+                        val safeDuration = durationSeconds.coerceIn(1, 600)
+                        sendMessageInternal(
+                            conversationId,
+                            senderId,
+                            "[VOICE:${upload.data}|$safeDuration]",
+                            allowMediaMarker = true
+                        )
                     }
                     is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
                 }
@@ -451,6 +490,18 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
+    fun loadProductForEdit(productId: String, onLoaded: (Product?) -> Unit) {
+        viewModelScope.launch {
+            when (val res = repository.fetchProductById(productId)) {
+                is ApiResult.Success -> onLoaded(res.data)
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(feedback = res.message) }
+                    onLoaded(null)
+                }
+            }
+        }
+    }
+
     fun publishListing(
         sellerId: String,
         editProductId: String?,
@@ -464,6 +515,7 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
         existingUrls: List<String>,
         newImageUris: List<Uri>,
         resolver: ContentResolver,
+        originalPrice: Double? = null,
         onSuccess: (String) -> Unit
     ) {
         viewModelScope.launch {
@@ -481,7 +533,19 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
             val result = if (editProductId.isNullOrBlank()) {
                 repository.createListing(sellerId, title, description, price, category, condition, campus, stock, uploadedUrls)
             } else {
-                repository.updateListing(editProductId, title, description, price, category, condition, campus, stock, uploadedUrls)
+                repository.updateListing(
+                    sellerId = sellerId,
+                    productId = editProductId,
+                    title = title,
+                    description = description,
+                    price = price,
+                    category = category,
+                    condition = condition,
+                    campus = campus,
+                    stock = stock,
+                    imageUrls = uploadedUrls,
+                    originalPrice = originalPrice
+                )
             }
             when (result) {
                 is ApiResult.Success -> {
@@ -497,7 +561,7 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
     fun deleteListing(productId: String, sellerId: String, onDeleted: () -> Unit) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
-            when (val res = repository.deleteListing(productId)) {
+            when (val res = repository.deleteListing(sellerId, productId)) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(actionLoading = false, feedback = "Listing deleted.") }
                     loadSellerHub(sellerId)

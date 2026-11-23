@@ -46,7 +46,7 @@ object TokenCipher {
 
     fun encrypt(plaintext: String): String {
         if (plaintext.isEmpty()) return ""
-        val key = getOrCreateKey() ?: return plaintext
+        val key = getOrCreateKey() ?: return ""
         return try {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, key)
@@ -57,7 +57,7 @@ object TokenCipher {
             System.arraycopy(ciphertext, 0, combined, iv.size, ciphertext.size)
             PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
         } catch (_: Throwable) {
-            plaintext
+            ""
         }
     }
 

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.repository.ApiResult
 import com.example.data.repository.KartRepository
+import com.example.domain.model.KartGhanaCampuses
 import com.example.domain.model.Profile
 import com.example.domain.model.UserSession
 import com.example.ui.theme.ThemePreference
@@ -72,6 +73,9 @@ class SessionViewModel(
     val emailNotifsEnabled: StateFlow<Boolean> = repository.sessionStore.emailNotifsEnabledFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
+    private val _campuses = MutableStateFlow(KartGhanaCampuses)
+    val campuses: StateFlow<List<String>> = _campuses.asStateFlow()
+
     private var unreadPollingJob: Job? = null
 
     init {
@@ -81,7 +85,9 @@ class SessionViewModel(
                 if (session.isLoggedIn) {
                     refreshUserMetadata(session.userId)
                     startUnreadPolling(session.userId)
-                    syncFcmToken(session.userId)
+                    if (repository.sessionStore.isPushEnabled()) {
+                        syncFcmToken(session.userId)
+                    }
                 } else {
                     unreadPollingJob?.cancel()
                     unreadPollingJob = null
@@ -104,15 +110,24 @@ class SessionViewModel(
             val maint = repository.isMaintenanceMode()
             _uiState.update { it.copy(isMaintenanceMode = maint) }
         }
+        viewModelScope.launch {
+            val loadedCampuses = repository.fetchCampuses()
+            if (loadedCampuses.isNotEmpty()) {
+                _campuses.value = loadedCampuses
+            }
+        }
     }
 
     private fun syncFcmToken(userId: String) {
+        if (userId.isBlank()) return
         runCatching {
             com.google.firebase.messaging.FirebaseMessaging.getInstance().token
                 .addOnSuccessListener { token ->
                     if (!token.isNullOrBlank()) {
                         viewModelScope.launch {
-                            repository.registerFcmToken(userId, token)
+                            if (repository.sessionStore.isPushEnabled()) {
+                                repository.registerFcmToken(userId, token)
+                            }
                         }
                     }
                 }
@@ -122,9 +137,22 @@ class SessionViewModel(
     private fun startUnreadPolling(userId: String) {
         unreadPollingJob?.cancel()
         unreadPollingJob = viewModelScope.launch {
+            var pollCycle = 0
             while (true) {
                 delay(15_000L)
+                pollCycle += 1
                 refreshUnreadCounts(userId)
+                if (pollCycle % 2 == 0) {
+                    val freshProfile = repository.fetchMyProfile(userId)
+                    val maint = repository.isMaintenanceMode()
+                    _uiState.update {
+                        it.copy(
+                            profile = freshProfile ?: it.profile,
+                            isBanned = freshProfile?.banned == true || it.isBanned && freshProfile == null,
+                            isMaintenanceMode = maint
+                        )
+                    }
+                }
             }
         }
     }
@@ -183,26 +211,34 @@ class SessionViewModel(
         }
     }
 
+    private suspend fun refreshUserMetadataSync(userId: String): Profile? {
+        if (userId.isBlank()) return null
+        val profile = repository.fetchMyProfile(userId)
+        val wishlistRes = repository.fetchWishlist(userId)
+        val unreadNotifs = repository.fetchUnreadNotificationsCount(userId)
+        val unreadMsgs = repository.fetchUnreadMessagesCount()
+        val maint = repository.isMaintenanceMode()
+
+        val savedIds = (wishlistRes as? ApiResult.Success)?.data?.map { it.productId }?.toSet()
+            ?: _uiState.value.wishlistIds
+
+        _uiState.update {
+            it.copy(
+                profile = profile ?: it.profile,
+                isBanned = profile?.banned == true,
+                isMaintenanceMode = maint,
+                wishlistIds = savedIds,
+                unreadMessages = unreadMsgs,
+                unreadNotifications = unreadNotifs
+            )
+        }
+        return profile
+    }
+
     fun refreshUserMetadata(userId: String = _uiState.value.session.userId) {
         if (userId.isBlank()) return
         viewModelScope.launch {
-            val profile = repository.fetchMyProfile(userId)
-            val wishlistRes = repository.fetchWishlist(userId)
-            val unreadNotifs = repository.fetchUnreadNotificationsCount(userId)
-            val unreadMsgs = repository.fetchUnreadMessagesCount()
-
-            val savedIds = (wishlistRes as? ApiResult.Success)?.data?.map { it.productId }?.toSet()
-                ?: _uiState.value.wishlistIds
-
-            _uiState.update {
-                it.copy(
-                    profile = profile ?: it.profile,
-                    isBanned = profile?.banned == true,
-                    wishlistIds = savedIds,
-                    unreadMessages = unreadMsgs,
-                    unreadNotifications = unreadNotifs
-                )
-            }
+            refreshUserMetadataSync(userId)
         }
     }
 
@@ -211,9 +247,11 @@ class SessionViewModel(
             _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
             when (val res = repository.signIn(email, password)) {
                 is ApiResult.Success -> {
+                    val profile = refreshUserMetadataSync(res.data.userId)
                     _uiState.update { it.copy(authLoading = false, authError = null) }
-                    refreshUserMetadata(res.data.userId)
-                    onSuccess()
+                    if (profile?.banned != true) {
+                        onSuccess()
+                    }
                 }
                 is ApiResult.Error -> {
                     _uiState.update { it.copy(authLoading = false, authError = res.message) }
@@ -227,9 +265,11 @@ class SessionViewModel(
             _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
             when (val res = repository.signInWithGoogleIdToken(idToken, rawNonce)) {
                 is ApiResult.Success -> {
+                    val profile = refreshUserMetadataSync(res.data.userId)
                     _uiState.update { it.copy(authLoading = false, authError = null) }
-                    refreshUserMetadata(res.data.userId)
-                    onSuccess()
+                    if (profile?.banned != true) {
+                        onSuccess()
+                    }
                 }
                 is ApiResult.Error -> {
                     _uiState.update { it.copy(authLoading = false, authError = res.message) }
@@ -278,10 +318,12 @@ class SessionViewModel(
             _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
             when (val res = repository.refreshSessionWithToken(refreshToken)) {
                 is ApiResult.Success -> {
+                    val profile = refreshUserMetadataSync(res.data.userId)
                     _uiState.update { it.copy(authLoading = false, authError = null) }
-                    refreshUserMetadata(res.data.userId)
-                    showMessage("Signed in to Kart!")
-                    onSuccess()
+                    if (profile?.banned != true) {
+                        showMessage("Signed in to Kart!")
+                        onSuccess()
+                    }
                 }
                 is ApiResult.Error -> {
                     _uiState.update { it.copy(authLoading = false, authError = res.message) }
@@ -334,7 +376,18 @@ class SessionViewModel(
     }
 
     fun setNotificationPrefs(push: Boolean, email: Boolean) {
-        viewModelScope.launch { repository.sessionStore.setNotificationPrefs(push, email) }
+        viewModelScope.launch {
+            repository.sessionStore.setNotificationPrefs(push, email)
+            val uid = _uiState.value.session.userId
+            if (uid.isNotBlank()) {
+                repository.syncNotificationPreferences(push, email)
+                if (!push) {
+                    repository.unregisterFcmToken()
+                } else {
+                    syncFcmToken(uid)
+                }
+            }
+        }
     }
 
     fun showMessage(msg: String) {

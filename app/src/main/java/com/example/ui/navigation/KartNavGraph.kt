@@ -101,6 +101,7 @@ fun KartAppRoot(
 
     val navController = rememberNavController()
     val sessionState by sessionViewModel.uiState.collectAsStateWithLifecycle()
+    val campuses by sessionViewModel.campuses.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -181,28 +182,51 @@ fun KartAppRoot(
                     sessionViewModel.showMessage(authErrorParam)
                 }
                 raw.contains("checkout-success") -> {
-                    val orderId = deepLinkUri.getQueryParameter("orderId")
-                    val subId = deepLinkUri.getQueryParameter("subscriptionId")
-                    val promoId = deepLinkUri.getQueryParameter("promotionId")
-                    val payType = deepLinkUri.getQueryParameter("type")
-                    val ref = deepLinkUri.getQueryParameter("reference") ?: deepLinkUri.getQueryParameter("trxref")
-                    if (!ref.isNullOrBlank()) {
-                        when {
-                            !subId.isNullOrBlank() || payType == "subscription" ->
-                                repository.verifySubscriptionReference(ref)
-                            !promoId.isNullOrBlank() || payType == "promotion" ->
-                                repository.verifyPromotionReference(ref)
-                            payType == "wallet" ->
-                                repository.verifyWalletDeposit(ref)
-                            else ->
-                                repository.verifyPaystackReference(ref)
+                    val isTrustedPaymentCallback =
+                        (deepLinkUri.scheme == "https" && deepLinkUri.host in setOf("www.kart.cx", "kart.cx")) ||
+                            deepLinkUri.scheme == "kart-app"
+                    if (!isTrustedPaymentCallback) {
+                        sessionViewModel.showMessage("Ignored untrusted payment callback link.")
+                    } else {
+                        val orderId = deepLinkUri.getQueryParameter("orderId")
+                        val subId = deepLinkUri.getQueryParameter("subscriptionId")
+                        val promoId = deepLinkUri.getQueryParameter("promotionId")
+                        val payType = deepLinkUri.getQueryParameter("type")
+                        val ref = deepLinkUri.getQueryParameter("reference") ?: deepLinkUri.getQueryParameter("trxref")
+                        var verificationFailed = false
+                        if (!ref.isNullOrBlank()) {
+                            val verifyRes = when {
+                                !subId.isNullOrBlank() || payType == "subscription" ->
+                                    repository.verifySubscriptionReference(ref)
+                                !promoId.isNullOrBlank() || payType == "promotion" ->
+                                    repository.verifyPromotionReference(ref)
+                                payType == "wallet" ->
+                                    repository.verifyWalletDeposit(ref)
+                                else ->
+                                    repository.verifyPaystackReference(ref)
+                            }
+                            if (verifyRes is com.example.data.repository.ApiResult.Error) {
+                                verificationFailed = true
+                                sessionViewModel.showMessage(verifyRes.message)
+                            } else {
+                                sessionViewModel.showMessage("Payment verified!")
+                            }
                         }
-                    }
-                    when {
-                        !orderId.isNullOrBlank() -> navController.navigate("order_detail/$orderId")
-                        !subId.isNullOrBlank() || payType == "subscription" -> navController.navigate("subscriptions")
-                        payType == "wallet" -> navController.navigate("wallet")
-                        else -> navController.navigate("orders")
+                        if (!verificationFailed) {
+                            val uid = sessionState.session.userId
+                            if (uid.isNotBlank()) {
+                                walletVm.loadWallet(uid)
+                                ordersVm.loadOrders(uid)
+                                sellerVm.loadSellerHub(uid)
+                            }
+                            when {
+                                !orderId.isNullOrBlank() -> navController.navigate("order_detail/$orderId")
+                                !subId.isNullOrBlank() || payType == "subscription" -> navController.navigate("subscriptions")
+                                !promoId.isNullOrBlank() || payType == "promotion" -> navController.navigate("seller_promotions")
+                                payType == "wallet" -> navController.navigate("wallet")
+                                else -> navController.navigate("orders")
+                            }
+                        }
                     }
                 }
                 deepLinkUri.path?.startsWith("/marketplace/") == true -> {
@@ -233,9 +257,22 @@ fun KartAppRoot(
                     navController.navigate("orders") { launchSingleTop = true }
                 }
                 deepLinkUri.path?.contains("/wallet") == true -> {
+                    val isTrustedWalletCallback =
+                        (deepLinkUri.scheme == "https" && deepLinkUri.host in setOf("www.kart.cx", "kart.cx")) ||
+                            deepLinkUri.scheme == "kart-app"
                     val ref = deepLinkUri.getQueryParameter("reference") ?: deepLinkUri.getQueryParameter("trxref")
-                    if (!ref.isNullOrBlank()) {
-                        repository.verifyWalletDeposit(ref)
+                    if (!ref.isNullOrBlank() && isTrustedWalletCallback) {
+                        when (val verifyRes = repository.verifyWalletDeposit(ref)) {
+                            is com.example.data.repository.ApiResult.Success -> {
+                                sessionViewModel.showMessage("Wallet deposit verified!")
+                            }
+                            is com.example.data.repository.ApiResult.Error -> {
+                                sessionViewModel.showMessage(verifyRes.message)
+                            }
+                        }
+                    }
+                    if (sessionState.session.userId.isNotBlank()) {
+                        walletVm.loadWallet(sessionState.session.userId)
                     }
                     navController.navigate("wallet") { launchSingleTop = true }
                 }
@@ -444,18 +481,34 @@ fun KartAppRoot(
 
                             composable("checkout/{id}") { backStack ->
                                 val pid = backStack.arguments?.getString("id").orEmpty()
-                                CheckoutScreen(
-                                    productId = pid,
-                                    repository = repository,
-                                    currentUserId = sessionState.session.userId.ifBlank { null },
-                                    onBack = { navController.popBackStack() },
-                                    onOrderCreated = { orderId ->
-                                        navController.navigate("order_detail/$orderId") {
+                                LaunchedEffect(sessionState.isLoggedIn) {
+                                    if (!sessionState.isLoggedIn) {
+                                        sessionViewModel.showMessage("Please sign in to complete checkout.")
+                                        navController.navigate("login") {
                                             popUpTo("checkout/$pid") { inclusive = true }
+                                            launchSingleTop = true
                                         }
-                                    },
-                                    onShowMessage = sessionViewModel::showMessage
-                                )
+                                    }
+                                }
+                                if (sessionState.isLoggedIn) {
+                                    CheckoutScreen(
+                                        productId = pid,
+                                        repository = repository,
+                                        currentUserId = sessionState.session.userId.ifBlank { null },
+                                        onBack = { navController.popBackStack() },
+                                        onOrderCreated = { orderId ->
+                                            val uid = sessionState.session.userId
+                                            if (uid.isNotBlank()) {
+                                                walletVm.loadWallet(uid)
+                                                ordersVm.loadOrders(uid)
+                                            }
+                                            navController.navigate("order_detail/$orderId") {
+                                                popUpTo("checkout/$pid") { inclusive = true }
+                                            }
+                                        },
+                                        onShowMessage = sessionViewModel::showMessage
+                                    )
+                                }
                             }
 
                             // --- Auth Routes ---
@@ -474,6 +527,7 @@ fun KartAppRoot(
                             composable("signup") {
                                 SignUpScreen(
                                     sessionViewModel = sessionViewModel,
+                                    campuses = campuses,
                                     onSignedUp = { immediate ->
                                         if (immediate) {
                                             navController.navigate("home") {
@@ -599,6 +653,7 @@ fun KartAppRoot(
                             composable("wallet_withdraw") {
                                 WithdrawFundsScreen(
                                     userId = sessionState.session.userId,
+                                    profile = sessionState.profile,
                                     viewModel = walletVm,
                                     onBack = { navController.popBackStack() },
                                     onShowMessage = sessionViewModel::showMessage
@@ -633,6 +688,8 @@ fun KartAppRoot(
                                 CreateEditListingScreen(
                                     sellerId = sessionState.session.userId.ifBlank { null },
                                     editProduct = null,
+                                    editProductId = null,
+                                    campuses = campuses,
                                     viewModel = sellerVm,
                                     onBack = { navController.popBackStack() },
                                     onRequireAuth = { navController.navigate("login") },
@@ -652,6 +709,8 @@ fun KartAppRoot(
                                 CreateEditListingScreen(
                                     sellerId = sessionState.session.userId.ifBlank { null },
                                     editProduct = existing,
+                                    editProductId = pid,
+                                    campuses = campuses,
                                     viewModel = sellerVm,
                                     onBack = { navController.popBackStack() },
                                     onRequireAuth = { navController.navigate("login") },
@@ -772,6 +831,7 @@ fun KartAppRoot(
                                 EditProfileScreen(
                                     userId = sessionState.session.userId,
                                     initialProfile = sessionState.profile,
+                                    campuses = campuses,
                                     viewModel = profileVm,
                                     onBack = { navController.popBackStack() },
                                     onSaved = {
@@ -882,6 +942,7 @@ fun KartAppRoot(
                             composable("verify_identity") {
                                 IdentityVerificationScreen(
                                     profile = sessionState.profile,
+                                    sessionViewModel = sessionViewModel,
                                     repository = repository,
                                     onBack = { navController.popBackStack() },
                                     onShowMessage = sessionViewModel::showMessage
@@ -892,6 +953,7 @@ fun KartAppRoot(
                             composable("admin") {
                                 AdminDashboardScreen(
                                     isAdmin = sessionState.isAdmin,
+                                    currentUserId = sessionState.session.userId,
                                     viewModel = adminVm,
                                     onBack = { navController.popBackStack() },
                                     onShowMessage = sessionViewModel::showMessage

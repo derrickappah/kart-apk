@@ -56,7 +56,11 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
-    fun toggleFollow(targetUserId: String) {
+    fun toggleFollow(targetUserId: String, currentUserId: String? = null) {
+        if (!currentUserId.isNullOrBlank() && targetUserId == currentUserId) {
+            _uiState.update { it.copy(feedback = "You cannot follow your own profile.") }
+            return
+        }
         val current = _uiState.value.bundle ?: return
         val next = !current.isFollowing
         val nextCount = (current.followersCount + if (next) 1 else -1).coerceAtLeast(0)
@@ -84,13 +88,13 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
     ) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
-            val resolvedPhone = whatsapp.trim().ifBlank { phone.trim() }
             val fields = buildMap<String, Any?> {
                 put("display_name", displayName.trim())
                 if (username.isNotBlank()) put("username", username.trim())
                 put("bio", bio.trim())
                 put("campus", campus.trim())
-                put("phone", resolvedPhone.ifBlank { null })
+                put("phone", phone.trim().ifBlank { null })
+                put("whatsapp_number", whatsapp.trim().ifBlank { null })
                 put("instagram", instagram.trim().ifBlank { null })
                 put("snapchat", snapchat.trim().ifBlank { null })
                 if (!avatarUrl.isNullOrBlank()) put("avatar_url", avatarUrl)

@@ -29,6 +29,7 @@ class KartFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         super.onMessageReceived(remoteMessage)
+        val app = application as? KartApplication ?: return
         val data = remoteMessage.data
         val title = data["title"]
             ?: remoteMessage.notification?.title
@@ -47,13 +48,22 @@ class KartFirebaseMessagingService : FirebaseMessagingService() {
         val deepLink = data["deep_link"] ?: data["link"]
         val notifId = (data["id"] ?: "${title}_${System.currentTimeMillis()}").hashCode()
 
-        KartNotificationHelper.showNotification(
-            context = applicationContext,
-            notificationId = notifId,
-            channelId = channelId,
-            title = title,
-            body = body,
-            deepLink = deepLink
-        )
+        serviceScope.launch {
+            val session = app.container.sessionStore.currentSession()
+            val pushAllowed = app.container.sessionStore.isPushEnabled()
+            if (!session.isLoggedIn || !pushAllowed) return@launch
+
+            val targetUserId = data["user_id"]?.trim()
+            if (!targetUserId.isNullOrBlank() && targetUserId != session.userId) return@launch
+
+            KartNotificationHelper.showNotification(
+                context = applicationContext,
+                notificationId = notifId,
+                channelId = channelId,
+                title = title,
+                body = body,
+                deepLink = deepLink
+            )
+        }
     }
 }

@@ -208,7 +208,6 @@ fun OrderDetailScreen(
     var showDeliveryModal by remember { mutableStateOf(false) }
     var showRefundModal by remember { mutableStateOf(false) }
     var showReviewModal by remember { mutableStateOf(false) }
-    var reviewSubmitted by remember { mutableStateOf(false) }
 
     LaunchedEffect(orderId) {
         viewModel.loadOrderDetail(orderId)
@@ -248,6 +247,7 @@ fun OrderDetailScreen(
             val order = state.selectedOrder!!
             val isBuyer = order.buyerId == currentUserId
             val isSeller = order.sellerId == currentUserId
+            val statusLower = order.status?.lowercase().orEmpty()
             val (statusBg, statusFg) = orderStatusColors(order.status)
 
             LazyColumn(
@@ -255,7 +255,7 @@ fun OrderDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                if (reviewSubmitted) {
+                if (state.hasReviewedOrder) {
                     item {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = KartSuccessContainer),
@@ -334,11 +334,11 @@ fun OrderDetailScreen(
                 // Escrow Progress Timeline
                 item {
                     val steps = listOf("Paid", "Shipped", "Delivered", "Completed")
-                    val currentStepIdx = when (order.status) {
-                        "Paid" -> 0
-                        "Shipped" -> 1
-                        "Delivered" -> 2
-                        "Completed" -> 3
+                    val currentStepIdx = when (statusLower) {
+                        "paid" -> 0
+                        "shipped" -> 1
+                        "delivered" -> 2
+                        "completed" -> 3
                         else -> -1
                     }
                     Card(
@@ -388,7 +388,29 @@ fun OrderDetailScreen(
                 // Contextual Buyer & Seller Actions
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (isSeller && order.status.equals("Paid", ignoreCase = true)) {
+                        if (state.hasPendingRefund || statusLower == "disputed") {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = KartWarningContainer),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(14.dp)
+                                ) {
+                                    Icon(KartLucideIcons.Flag, contentDescription = null, tint = KartWarning)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = "A refund dispute is currently under review by Kart Escrow.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = KartWarning
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isSeller && statusLower == "paid" && !state.hasPendingRefund) {
                             KartPrimaryButton(
                                 text = "Mark as Shipped / Ready for Handoff",
                                 icon = KartLucideIcons.Truck,
@@ -398,7 +420,28 @@ fun OrderDetailScreen(
                             )
                         }
 
-                        if (isBuyer && order.status in listOf("Paid", "Shipped")) {
+                        if (isBuyer && statusLower == "paid" && !state.hasPendingRefund) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = KartInfoContainer),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(14.dp)
+                                ) {
+                                    Icon(KartLucideIcons.Truck, contentDescription = null, tint = KartPrimary)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = "Waiting for the seller to mark this order as shipped / ready for handoff before delivery confirmation.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartPrimary
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isBuyer && statusLower == "shipped" && !state.hasPendingRefund) {
                             KartPrimaryButton(
                                 text = "Confirm Delivery & Release Escrow",
                                 icon = KartLucideIcons.ShieldCheck,
@@ -406,6 +449,9 @@ fun OrderDetailScreen(
                                 onClick = { showDeliveryModal = true },
                                 modifier = Modifier.fillMaxWidth()
                             )
+                        }
+
+                        if (isBuyer && statusLower in setOf("paid", "shipped") && !state.hasPendingRefund) {
                             KartOutlineButton(
                                 text = "Request Refund",
                                 borderColor = KartDanger,
@@ -415,7 +461,7 @@ fun OrderDetailScreen(
                             )
                         }
 
-                        if (isBuyer && order.status in listOf("Delivered", "Completed") && !reviewSubmitted) {
+                        if (isBuyer && statusLower in setOf("delivered", "completed") && !state.hasReviewedOrder) {
                             KartPrimaryButton(
                                 text = "Rate Seller & Write Review",
                                 icon = KartLucideIcons.StarFilled,
@@ -466,7 +512,6 @@ fun OrderDetailScreen(
                     onSubmit = { rating, formatted ->
                         viewModel.submitOrderReview(order, rating, formatted) {
                             showReviewModal = false
-                            reviewSubmitted = true
                         }
                     }
                 )

@@ -282,12 +282,11 @@ fun ProductDetailScreen(
 
                     // 5: Buyer Reviews Section
                     item(key = "reviews_section") {
-                        val hasUserReview = currentUserId != null &&
-                            bundle.reviews.any { (it.buyerId ?: it.reviewerId) == currentUserId }
                         ProductReviewsSection(
                             reviews = bundle.reviews,
                             isOwner = isOwner,
-                            hasUserReview = hasUserReview,
+                            canReview = bundle.canReview,
+                            hasUserReview = bundle.hasUserReviewed,
                             onWriteReview = {
                                 if (currentUserId == null) onRequireAuth()
                                 else showReviewDialog = true
@@ -337,6 +336,8 @@ fun ProductDetailScreen(
                 ProductStickyBottomBar(
                     priceText = KartFormatters.formatCedis(product.price),
                     isOwner = isOwner,
+                    isOutOfStock = product.isOutOfStock,
+                    isActive = product.isActiveListing,
                     actionLoading = state.actionLoading,
                     onChatClick = {
                         if (currentUserId == null) onRequireAuth()
@@ -358,7 +359,14 @@ fun ProductDetailScreen(
                         onDismiss = { showReviewDialog = false },
                         onSubmit = { rating, formatted ->
                             showReviewDialog = false
-                            viewModel.submitReview(product.id, sellerId, rating, formatted, currentUserId)
+                            viewModel.submitReview(
+                                productId = product.id,
+                                sellerId = sellerId,
+                                rating = rating,
+                                comment = formatted,
+                                currentUserId = currentUserId,
+                                orderId = bundle.verifiedBuyerOrderId
+                            )
                         }
                     )
                 }
@@ -1116,6 +1124,7 @@ private fun ProductSellerSection(
 private fun ProductReviewsSection(
     reviews: List<Review>,
     isOwner: Boolean,
+    canReview: Boolean,
     hasUserReview: Boolean,
     onWriteReview: () -> Unit
 ) {
@@ -1148,7 +1157,7 @@ private fun ProductReviewsSection(
                     color = tokens.textSecondary
                 )
             }
-            if (!isOwner) {
+            if (!isOwner && canReview && !hasUserReview) {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
@@ -1159,7 +1168,7 @@ private fun ProductReviewsSection(
                         .testTag("product_write_review_btn")
                 ) {
                     Text(
-                        text = if (hasUserReview) "Edit your review" else "Write a review",
+                        text = "Write a review",
                         style = MaterialTheme.typography.labelLarge.copy(
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold
@@ -1167,14 +1176,29 @@ private fun ProductReviewsSection(
                         color = KartPrimary
                     )
                 }
+            } else if (!isOwner && hasUserReview) {
+                Text(
+                    text = "Reviewed",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tokens.textMuted
+                )
             }
+        }
+
+        if (!isOwner && !canReview && !hasUserReview) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Verified buyers can leave a review after delivery.",
+                style = MaterialTheme.typography.bodySmall,
+                color = tokens.textMuted
+            )
         }
 
         Spacer(Modifier.height(10.dp))
 
         if (reviews.isEmpty()) {
             Text(
-                text = "No reviews for this seller yet. Leave feedback after completing your campus handoff.",
+                text = "No reviews for this listing yet. Verified buyers can share feedback after completing their campus handoff.",
                 style = MaterialTheme.typography.bodyMedium.copy(
                     fontSize = 14.sp,
                     lineHeight = 21.sp
@@ -1201,7 +1225,8 @@ private fun ProductReviewsSection(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = review.reviewer?.displayName ?: "Verified buyer",
+                                    text = review.reviewer?.displayName
+                                        ?: if (!review.orderId.isNullOrBlank()) "Verified buyer" else "Campus buyer",
                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                                     color = tokens.textPrimary
                                 )
@@ -1305,12 +1330,15 @@ private fun ProductSimilarSection(
 private fun ProductStickyBottomBar(
     priceText: String,
     isOwner: Boolean,
+    isOutOfStock: Boolean,
+    isActive: Boolean,
     actionLoading: Boolean,
     onChatClick: () -> Unit,
     onBuyNowClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tokens = KartThemeTokens.colors
+    val canBuy = !isOutOfStock && isActive
 
     Surface(
         color = MaterialTheme.colorScheme.background,
@@ -1380,7 +1408,7 @@ private fun ProductStickyBottomBar(
 
                     Button(
                         onClick = onBuyNowClick,
-                        enabled = !actionLoading,
+                        enabled = !actionLoading && canBuy,
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = KartPrimary,
@@ -1407,7 +1435,11 @@ private fun ProductStickyBottomBar(
                             Spacer(Modifier.width(8.dp))
                         }
                         Text(
-                            text = "Buy now · $priceText",
+                            text = when {
+                                isOutOfStock -> "Out of Stock"
+                                !isActive -> "Listing Unavailable"
+                                else -> "Buy now · $priceText"
+                            },
                             style = MaterialTheme.typography.labelLarge.copy(
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold

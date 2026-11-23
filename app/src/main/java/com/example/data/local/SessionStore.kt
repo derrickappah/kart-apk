@@ -58,10 +58,18 @@ class SessionStore(private val context: Context) {
 
     suspend fun currentSession(): UserSession = sessionFlow.first()
 
+    suspend fun isPushEnabled(): Boolean = pushEnabledFlow.first()
+
     suspend fun saveSession(session: UserSession) {
+        val encAccess = TokenCipher.encrypt(session.accessToken)
+        val encRefresh = TokenCipher.encrypt(session.refreshToken)
+        if (session.accessToken.isNotBlank() && encAccess.isBlank()) {
+            // Never persist plaintext session tokens if Keystore encryption fails
+            return
+        }
         context.kartDataStore.edit { prefs ->
-            prefs[Keys.ACCESS_TOKEN] = TokenCipher.encrypt(session.accessToken)
-            prefs[Keys.REFRESH_TOKEN] = TokenCipher.encrypt(session.refreshToken)
+            prefs[Keys.ACCESS_TOKEN] = encAccess
+            prefs[Keys.REFRESH_TOKEN] = encRefresh
             prefs[Keys.USER_ID] = session.userId
             prefs[Keys.USER_EMAIL] = session.email
         }

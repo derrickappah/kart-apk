@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -41,6 +42,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -87,10 +89,13 @@ import com.example.ui.components.KartTextField
 import com.example.ui.components.ShimmerBox
 import com.example.ui.components.StatusPill
 import com.example.ui.theme.KartDanger
+import com.example.ui.theme.KartDangerContainer
 import com.example.ui.theme.KartPrimary
 import com.example.ui.theme.KartSuccess
 import com.example.ui.theme.KartSuccessContainer
 import com.example.ui.theme.KartThemeTokens
+import com.example.ui.theme.KartWarning
+import com.example.ui.theme.KartWarningContainer
 import com.example.ui.viewmodel.SellerViewModel
 
 @Composable
@@ -138,7 +143,7 @@ fun SellerDashboardScreen(
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
                             KpiCard("Items Sold", "${hub?.itemsSold ?: 0}", tokens.textPrimary, Modifier.weight(1f))
-                            KpiCard("Active Promos", "${hub?.promotions?.count { it.status == "Active" } ?: 0}", KartPrimary, Modifier.weight(1f))
+                            KpiCard("Active Promos", "${hub?.promotions?.count { it.status.equals("Active", true) } ?: 0}", KartPrimary, Modifier.weight(1f))
                         }
                     }
                 }
@@ -249,6 +254,8 @@ fun SellerEarningsAreaChart(
 fun CreateEditListingScreen(
     sellerId: String?,
     editProduct: Product? = null,
+    editProductId: String? = null,
+    campuses: List<String> = KartGhanaCampuses,
     viewModel: SellerViewModel,
     onBack: () -> Unit,
     onRequireAuth: () -> Unit,
@@ -276,16 +283,75 @@ fun CreateEditListingScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val tokens = KartThemeTokens.colors
+    val availableCampuses = campuses.ifEmpty { KartGhanaCampuses }
 
-    var title by remember(editProduct) { mutableStateOf(editProduct?.title.orEmpty()) }
-    var description by remember(editProduct) { mutableStateOf(editProduct?.description.orEmpty()) }
-    var price by remember(editProduct) { mutableStateOf(editProduct?.price?.takeIf { it > 0 }?.toString().orEmpty()) }
-    var category by remember(editProduct) { mutableStateOf(editProduct?.category ?: KartCategories.first().name) }
-    var condition by remember(editProduct) {
-        mutableStateOf(conditionOptionFor(editProduct?.condition)?.name ?: "Like New")
+    var loadedEditProduct by remember(editProduct, editProductId) { mutableStateOf(editProduct) }
+    var loadingEditProduct by remember(editProductId) {
+        mutableStateOf(editProduct == null && !editProductId.isNullOrBlank())
     }
-    var campus by remember(editProduct) { mutableStateOf(editProduct?.campus ?: KartGhanaCampuses.first()) }
-    var existingUrls by remember(editProduct) { mutableStateOf(editProduct?.allImages.orEmpty()) }
+
+    LaunchedEffect(editProductId) {
+        if (loadedEditProduct == null && !editProductId.isNullOrBlank()) {
+            loadingEditProduct = true
+            viewModel.loadProductForEdit(editProductId) { found ->
+                loadedEditProduct = found
+                loadingEditProduct = false
+            }
+        }
+    }
+
+    LaunchedEffect(state.feedback) {
+        state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
+    }
+
+    if (loadingEditProduct) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            KartSubScreenTopBar(title = "Edit listing", onBack = onBack)
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(20.dp)) {
+                ShimmerBox(modifier = Modifier.fillMaxWidth().height(120.dp))
+                ShimmerBox(modifier = Modifier.fillMaxWidth().height(56.dp))
+                ShimmerBox(modifier = Modifier.fillMaxWidth().height(100.dp))
+            }
+        }
+        return
+    }
+
+    if (!editProductId.isNullOrBlank() && loadedEditProduct == null) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            KartSubScreenTopBar(title = "Edit listing", onBack = onBack)
+            EmptyStateView(
+                asset = EmptyStateAsset.ERROR,
+                title = "Listing not found",
+                subtitle = "We couldn't load this listing for editing. Please go back and try again.",
+                actionLabel = "Go Back",
+                onActionClick = onBack,
+                modifier = Modifier.weight(1f).fillMaxWidth()
+            )
+        }
+        return
+    }
+
+    val targetEdit = loadedEditProduct
+    var title by remember(targetEdit) { mutableStateOf(targetEdit?.title.orEmpty()) }
+    var description by remember(targetEdit) { mutableStateOf(targetEdit?.description.orEmpty()) }
+    var price by remember(targetEdit) { mutableStateOf(targetEdit?.price?.takeIf { it > 0 }?.toString().orEmpty()) }
+    var stockText by remember(targetEdit) { mutableStateOf((targetEdit?.stockQuantity ?: 1).coerceAtLeast(0).toString()) }
+    var category by remember(targetEdit) { mutableStateOf(targetEdit?.category ?: KartCategories.first().name) }
+    var condition by remember(targetEdit) {
+        mutableStateOf(conditionOptionFor(targetEdit?.condition)?.name ?: "Like New")
+    }
+    var campus by remember(targetEdit, availableCampuses) {
+        mutableStateOf(targetEdit?.campus ?: availableCampuses.first())
+    }
+    var existingUrls by remember(targetEdit) { mutableStateOf(targetEdit?.allImages.orEmpty()) }
     var pickedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var createdId by remember { mutableStateOf<String?>(null) }
     var showPhotoSourceSheet by remember { mutableStateOf(false) }
@@ -312,10 +378,6 @@ fun CreateEditListingScreen(
         }
     }
 
-    LaunchedEffect(state.feedback) {
-        state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
-    }
-
     if (createdId != null) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -328,7 +390,7 @@ fun CreateEditListingScreen(
             Icon(KartLucideIcons.CheckCircle, contentDescription = null, tint = KartSuccess, modifier = Modifier.size(72.dp))
             Spacer(Modifier.height(16.dp))
             Text(
-                text = if (editProduct != null) "Listing Updated!" else "Listing Live on Campus!",
+                text = if (targetEdit != null) "Listing Updated!" else "Listing Live on Campus!",
                 style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Black
             )
@@ -361,11 +423,18 @@ fun CreateEditListingScreen(
                 .background(MaterialTheme.colorScheme.background)
         ) {
             KartSubScreenTopBar(
-                title = if (editProduct != null) "Edit listing" else "Sell an item",
+                title = if (targetEdit != null) "Edit listing" else "Sell an item",
                 onBack = onBack
             )
 
-        val canPublish = title.trim().length >= 3 && (price.toDoubleOrNull() ?: 0.0) > 0
+        val parsedPrice = price.toDoubleOrNull() ?: 0.0
+        val parsedStock = stockText.toIntOrNull() ?: -1
+        val minStock = if (targetEdit != null) 0 else 1
+        val canPublish = title.trim().length >= 3 &&
+            description.trim().length >= 10 &&
+            parsedPrice in 0.01..1_000_000.0 &&
+            parsedStock >= minStock &&
+            totalPhotoCount >= 1
 
         LazyColumn(
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
@@ -551,29 +620,40 @@ fun CreateEditListingScreen(
                 }
             }
 
-            // Basics: Title, Price, Description (no redundant parent heading)
+            // Basics: Title, Price, Stock, Description
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     KartTextField(
                         value = title,
-                        onValueChange = { title = it },
+                        onValueChange = { title = it.take(120) },
                         label = "Title",
                         placeholder = "MacBook Air M2 256GB",
                         testTag = "listing_title_input"
                     )
-                    KartTextField(
-                        value = price,
-                        onValueChange = { price = it.filter { c -> c.isDigit() || c == '.' } },
-                        label = "Price (₵ GHS)",
-                        placeholder = "450",
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.fillMaxWidth(),
-                        testTag = "listing_price_input"
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+                        KartTextField(
+                            value = price,
+                            onValueChange = { price = KartFormatters.sanitizeDecimalInput(it) },
+                            label = "Price (₵ GHS)",
+                            placeholder = "450",
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1.4f),
+                            testTag = "listing_price_input"
+                        )
+                        KartTextField(
+                            value = stockText,
+                            onValueChange = { stockText = it.filter(Char::isDigit).take(4) },
+                            label = "Quantity",
+                            placeholder = "1",
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(0.9f),
+                            testTag = "listing_stock_input"
+                        )
+                    }
                     KartTextField(
                         value = description,
-                        onValueChange = { description = it },
-                        label = "Description",
+                        onValueChange = { description = it.take(2000) },
+                        label = "Description (min 10 chars)",
                         placeholder = "Condition, specs, or meetup spot",
                         singleLine = false,
                         maxLines = 5,
@@ -625,7 +705,7 @@ fun CreateEditListingScreen(
                         color = tokens.textPrimary
                     )
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(KartGhanaCampuses.take(8)) { c ->
+                        items(availableCampuses) { c ->
                             KartChip(label = c, selected = campus == c, onClick = { campus = c })
                         }
                     }
@@ -642,29 +722,38 @@ fun CreateEditListingScreen(
                 .navigationBarsPadding()
         ) {
             HorizontalDivider(color = tokens.cardBorder)
-            Box(
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp, vertical = 12.dp)
             ) {
+                if (!canPublish) {
+                    Text(
+                        text = "Add at least 1 photo, a title (3+ chars), description (10+ chars), valid price, and quantity.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = tokens.textSecondary
+                    )
+                }
                 KartPrimaryButton(
-                    text = if (editProduct != null) "Save changes" else "Publish listing",
+                    text = if (targetEdit != null) "Save changes" else "Publish listing",
                     loading = state.actionLoading,
                     enabled = canPublish,
                     onClick = {
                         viewModel.publishListing(
                             sellerId = sellerId,
-                            editProductId = editProduct?.id,
+                            editProductId = targetEdit?.id,
                             title = title,
                             description = description,
-                            price = price.toDoubleOrNull() ?: 0.0,
+                            price = parsedPrice,
                             category = category,
                             condition = condition,
                             campus = campus,
-                            stock = editProduct?.stockQuantity ?: 1,
+                            stock = parsedStock.coerceAtLeast(minStock),
                             existingUrls = existingUrls,
                             newImageUris = pickedUris,
                             resolver = context.contentResolver,
+                            originalPrice = targetEdit?.price,
                             onSuccess = { id -> createdId = id }
                         )
                     },
@@ -735,6 +824,7 @@ fun MyListingsScreen(
     onShowMessage: (String) -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var pendingDeleteProduct by remember { mutableStateOf<Product?>(null) }
     LaunchedEffect(sellerId) { viewModel.loadSellerHub(sellerId) }
     LaunchedEffect(state.feedback) {
         state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
@@ -797,7 +887,11 @@ fun MyListingsScreen(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(item.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1)
                                     Text(KartFormatters.formatCedis(item.price), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = KartPrimary)
-                                    Text("${item.viewsCount ?: 0} views • ${item.status ?: "Active"}", style = MaterialTheme.typography.bodySmall, color = KartThemeTokens.colors.textSecondary)
+                                    Text(
+                                        "${item.viewsCount ?: 0} views • Stock ${item.stockQuantity ?: 1} • ${item.status ?: "Active"}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartThemeTokens.colors.textSecondary
+                                    )
                                 }
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -810,7 +904,7 @@ fun MyListingsScreen(
                                 IconButton(onClick = { onEditListing(item.id) }) {
                                     Icon(KartLucideIcons.Pencil, contentDescription = "Edit listing", tint = KartPrimary)
                                 }
-                                IconButton(onClick = { viewModel.deleteListing(item.id, sellerId) {} }) {
+                                IconButton(onClick = { pendingDeleteProduct = item }) {
                                     Icon(KartLucideIcons.Trash2, contentDescription = "Delete listing", tint = KartDanger)
                                 }
                             }
@@ -819,6 +913,29 @@ fun MyListingsScreen(
                 }
             }
         }
+    }
+
+    pendingDeleteProduct?.let { prod ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteProduct = null },
+            title = { Text("Delete Listing?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("Are you sure you want to delete \"${prod.title}\"? Listings with active escrow orders or running promotions cannot be deleted.")
+            },
+            confirmButton = {
+                KartPrimaryButton(
+                    text = "Delete",
+                    containerColor = KartDanger,
+                    onClick = {
+                        pendingDeleteProduct = null
+                        viewModel.deleteListing(prod.id, sellerId) {}
+                    }
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteProduct = null }) { Text("Cancel") }
+            }
+        )
     }
 }
 
@@ -838,6 +955,10 @@ fun PromoteListingScreen(
         Triple("Featured", "Featured Slider + Home Spotlight", 35.0),
         Triple("Campus Ad", "Top Hero Banner across your campus", 65.0)
     )
+
+    LaunchedEffect(state.feedback) {
+        state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
+    }
 
     Column(
         modifier = Modifier
@@ -885,6 +1006,12 @@ fun PromoteListingScreen(
                         KartChip(label = "$d days", selected = days == d, onClick = { days = d })
                     }
                 }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Estimated rate — exact campaign total is confirmed by the server at Paystack checkout.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = KartThemeTokens.colors.textSecondary
+                )
             }
             item {
                 KartPrimaryButton(
@@ -941,6 +1068,11 @@ fun PromotionsListScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(promos, key = { it.id }) { ad ->
+                    val (pillBg, pillFg) = when (ad.status?.lowercase()) {
+                        "active" -> KartSuccessContainer to KartSuccess
+                        "pending" -> KartWarningContainer to KartWarning
+                        else -> KartDangerContainer to KartDanger
+                    }
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         shape = RoundedCornerShape(16.dp),
@@ -952,7 +1084,7 @@ fun PromotionsListScreen(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(ad.product?.title ?: ad.adType ?: "Campaign", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                StatusPill(ad.status ?: "Active", KartSuccessContainer, KartSuccess)
+                                StatusPill(ad.status ?: "Pending", pillBg, pillFg)
                             }
                             Text(
                                 "${ad.adType ?: "Boost"} • ${ad.views ?: 0} impressions • ${ad.clicks ?: 0} clicks",

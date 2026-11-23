@@ -166,6 +166,12 @@ data class Product(
             }
             return combined
         }
+
+    val isOutOfStock: Boolean
+        get() = (stockQuantity ?: 1) <= 0
+
+    val isActiveListing: Boolean
+        get() = status.isNullOrBlank() || status.equals("Active", ignoreCase = true)
 }
 
 @JsonClass(generateAdapter = true)
@@ -202,6 +208,7 @@ data class Profile(
     val phone: String? = null,
     @Json(name = "is_verified") val isVerified: Boolean? = false,
     @Json(name = "verification_status") val verificationStatus: String? = null,
+    @Json(name = "verification_rejection_reason") val verificationRejectionReason: String? = null,
     @Json(name = "is_admin") val isAdmin: Boolean? = false,
     val banned: Boolean? = false,
     @Json(name = "average_rating") val averageRating: Double? = 0.0,
@@ -413,7 +420,11 @@ data class FollowRow(
 data class VerificationRequestRow(
     val id: String,
     @Json(name = "user_id") val userId: String? = null,
+    @Json(name = "full_name") val fullName: String? = null,
+    @Json(name = "student_id_number") val studentIdNumber: String? = null,
+    val campus: String? = null,
     val status: String? = null,
+    @Json(name = "rejection_reason") val rejectionReason: String? = null,
     @Json(name = "id_image_url") val idImageUrl: String? = null,
     @Json(name = "selfie_image_url") val selfieImageUrl: String? = null,
     @Json(name = "created_at") val createdAt: String? = null
