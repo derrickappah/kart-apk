@@ -22,6 +22,7 @@ object TokenCipher {
     private const val IV_LENGTH_BYTES = 12
     internal const val PREFIX = "enc:v1:"
 
+    @Synchronized
     private fun getOrCreateKey(): SecretKey? {
         return try {
             val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }

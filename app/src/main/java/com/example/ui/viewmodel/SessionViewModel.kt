@@ -26,10 +26,14 @@ data class SessionUiState(
     val session: UserSession = UserSession(),
     val profile: Profile? = null,
     val wishlistIds: Set<String> = emptySet(),
+    val blockedUserIds: Set<String> = emptySet(),
     val unreadMessages: Int = 0,
     val unreadNotifications: Int = 0,
     val isMaintenanceMode: Boolean = false,
     val buyNowEnabled: Boolean = true,
+    val promoBoostRate: Double = 15.0,
+    val promoFeaturedRate: Double = 35.0,
+    val promoCampusAdRate: Double = 65.0,
     val isBanned: Boolean = false,
     val snackbarMessage: String? = null,
     val authLoading: Boolean = false,
@@ -69,22 +73,30 @@ class SessionViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "English (GH)")
 
     val pushEnabled: StateFlow<Boolean> = repository.sessionStore.pushEnabledFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     val emailNotifsEnabled: StateFlow<Boolean> = repository.sessionStore.emailNotifsEnabledFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     private val _campuses = MutableStateFlow(KartGhanaCampuses)
     val campuses: StateFlow<List<String>> = _campuses.asStateFlow()
 
     private var unreadPollingJob: Job? = null
+    private var maintenancePollingJob: Job? = null
+    private var lastMetadataRefreshUserId: String? = null
+    private var lastMetadataRefreshAtMs: Long = 0L
 
     init {
         viewModelScope.launch {
             repository.sessionStore.sessionFlow.collect { session ->
                 _uiState.update { it.copy(session = session) }
                 if (session.isLoggedIn) {
-                    refreshUserMetadata(session.userId)
+                    val now = System.currentTimeMillis()
+                    val recentlySynced = lastMetadataRefreshUserId == session.userId &&
+                        (now - lastMetadataRefreshAtMs) < 3_000L
+                    if (!recentlySynced) {
+                        refreshUserMetadata(session.userId)
+                    }
                     startUnreadPolling(session.userId)
                     if (repository.sessionStore.isPushEnabled()) {
                         syncFcmToken(session.userId)
@@ -92,6 +104,8 @@ class SessionViewModel(
                 } else {
                     unreadPollingJob?.cancel()
                     unreadPollingJob = null
+                    lastMetadataRefreshUserId = null
+                    lastMetadataRefreshAtMs = 0L
                     seenNotificationIds.clear()
                     initializedNotificationBaseline = false
                     lastKnownUnreadMessages = null
@@ -99,6 +113,7 @@ class SessionViewModel(
                         it.copy(
                             profile = null,
                             wishlistIds = emptySet(),
+                            blockedUserIds = emptySet(),
                             unreadMessages = 0,
                             unreadNotifications = 0,
                             isBanned = false
@@ -108,19 +123,45 @@ class SessionViewModel(
             }
         }
         viewModelScope.launch {
-            val flags = repository.fetchPlatformFlags()
-            _uiState.update {
-                it.copy(
-                    isMaintenanceMode = flags.isMaintenanceMode,
-                    buyNowEnabled = flags.buyNowEnabled
-                )
-            }
+            applyPlatformFlags(repository.fetchPlatformFlags())
         }
         viewModelScope.launch {
             val loadedCampuses = repository.fetchCampuses()
             if (loadedCampuses.isNotEmpty()) {
                 _campuses.value = loadedCampuses
             }
+        }
+    }
+
+    private fun applyPlatformFlags(flags: com.example.domain.model.PlatformFlags) {
+        _uiState.update {
+            it.copy(
+                isMaintenanceMode = flags.isMaintenanceMode,
+                buyNowEnabled = flags.buyNowEnabled,
+                promoBoostRate = flags.promoBoostRate,
+                promoFeaturedRate = flags.promoFeaturedRate,
+                promoCampusAdRate = flags.promoCampusAdRate
+            )
+        }
+        if (flags.isMaintenanceMode && maintenancePollingJob?.isActive != true) {
+            maintenancePollingJob = viewModelScope.launch {
+                while (_uiState.value.isMaintenanceMode) {
+                    delay(30_000L)
+                    val refreshed = repository.fetchPlatformFlags()
+                    _uiState.update {
+                        it.copy(
+                            isMaintenanceMode = refreshed.isMaintenanceMode,
+                            buyNowEnabled = refreshed.buyNowEnabled,
+                            promoBoostRate = refreshed.promoBoostRate,
+                            promoFeaturedRate = refreshed.promoFeaturedRate,
+                            promoCampusAdRate = refreshed.promoCampusAdRate
+                        )
+                    }
+                }
+            }
+        } else if (!flags.isMaintenanceMode) {
+            maintenancePollingJob?.cancel()
+            maintenancePollingJob = null
         }
     }
 
@@ -154,11 +195,10 @@ class SessionViewModel(
                     _uiState.update {
                         it.copy(
                             profile = freshProfile ?: it.profile,
-                            isBanned = freshProfile?.banned == true || it.isBanned && freshProfile == null,
-                            isMaintenanceMode = flags.isMaintenanceMode,
-                            buyNowEnabled = flags.buyNowEnabled
+                            isBanned = freshProfile?.banned == true || it.isBanned && freshProfile == null
                         )
                     }
+                    applyPlatformFlags(flags)
                 }
             }
         }
@@ -220,38 +260,37 @@ class SessionViewModel(
 
     private suspend fun refreshUserMetadataSync(userId: String): Profile? {
         if (userId.isBlank()) return null
+        lastMetadataRefreshUserId = userId
+        lastMetadataRefreshAtMs = System.currentTimeMillis()
         val profile = repository.fetchMyProfile(userId)
         val wishlistRes = repository.fetchWishlist(userId)
+        val blockedRes = repository.fetchBlockedUsers()
         val unreadNotifs = repository.fetchUnreadNotificationsCount(userId)
         val unreadMsgs = repository.fetchUnreadMessagesCount()
         val flags = repository.fetchPlatformFlags()
 
         val savedIds = (wishlistRes as? ApiResult.Success)?.data?.map { it.productId }?.toSet()
             ?: _uiState.value.wishlistIds
+        val blockedIds = (blockedRes as? ApiResult.Success)?.data?.first
+            ?: _uiState.value.blockedUserIds
 
         _uiState.update {
             it.copy(
                 profile = profile ?: it.profile,
-                isBanned = profile?.banned == true,
-                isMaintenanceMode = flags.isMaintenanceMode,
-                buyNowEnabled = flags.buyNowEnabled,
+                isBanned = profile?.banned == true || (it.isBanned && profile == null),
                 wishlistIds = savedIds,
+                blockedUserIds = blockedIds,
                 unreadMessages = unreadMsgs,
                 unreadNotifications = unreadNotifs
             )
         }
+        applyPlatformFlags(flags)
         return profile
     }
 
     fun refreshPlatformFlags() {
         viewModelScope.launch {
-            val flags = repository.fetchPlatformFlags()
-            _uiState.update {
-                it.copy(
-                    isMaintenanceMode = flags.isMaintenanceMode,
-                    buyNowEnabled = flags.buyNowEnabled
-                )
-            }
+            applyPlatformFlags(repository.fetchPlatformFlags())
         }
     }
 
@@ -272,9 +311,19 @@ class SessionViewModel(
             when (val res = repository.signIn(email, password)) {
                 is ApiResult.Success -> {
                     val profile = refreshUserMetadataSync(res.data.userId)
-                    _uiState.update { it.copy(authLoading = false, authError = null) }
-                    if (profile?.banned != true) {
-                        onSuccess()
+                    if (profile == null) {
+                        repository.signOut()
+                        _uiState.update {
+                            it.copy(
+                                authLoading = false,
+                                authError = "Could not verify your account status. Check your connection and try again."
+                            )
+                        }
+                    } else {
+                        _uiState.update { it.copy(authLoading = false, authError = null) }
+                        if (profile.banned != true) {
+                            onSuccess()
+                        }
                     }
                 }
                 is ApiResult.Error -> {
@@ -290,9 +339,19 @@ class SessionViewModel(
             when (val res = repository.signInWithGoogleIdToken(idToken, rawNonce)) {
                 is ApiResult.Success -> {
                     val profile = refreshUserMetadataSync(res.data.userId)
-                    _uiState.update { it.copy(authLoading = false, authError = null) }
-                    if (profile?.banned != true) {
-                        onSuccess()
+                    if (profile == null) {
+                        repository.signOut()
+                        _uiState.update {
+                            it.copy(
+                                authLoading = false,
+                                authError = "Could not verify your account status. Check your connection and try again."
+                            )
+                        }
+                    } else {
+                        _uiState.update { it.copy(authLoading = false, authError = null) }
+                        if (profile.banned != true) {
+                            onSuccess()
+                        }
                     }
                 }
                 is ApiResult.Error -> {
@@ -314,11 +373,15 @@ class SessionViewModel(
             _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
             when (val res = repository.signUp(email, password, displayName, campus, phone)) {
                 is ApiResult.Success -> {
-                    val nowLoggedIn = repository.sessionStore.currentSession().isLoggedIn
+                    val session = repository.sessionStore.currentSession()
+                    val nowLoggedIn = session.isLoggedIn
+                    val profile = if (nowLoggedIn) refreshUserMetadataSync(session.userId) else null
                     _uiState.update {
                         it.copy(authLoading = false, authInfo = res.data, authError = null)
                     }
-                    onDone(nowLoggedIn)
+                    if (!nowLoggedIn || profile?.banned != true) {
+                        onDone(nowLoggedIn)
+                    }
                 }
                 is ApiResult.Error -> {
                     _uiState.update { it.copy(authLoading = false, authError = res.message) }
@@ -327,12 +390,93 @@ class SessionViewModel(
         }
     }
 
-    fun sendPasswordReset(email: String) {
+    fun sendPasswordReset(email: String, onCodeSent: () -> Unit = {}) {
         viewModelScope.launch {
             _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
             when (val res = repository.recoverPassword(email)) {
-                is ApiResult.Success -> _uiState.update { it.copy(authLoading = false, authInfo = res.data) }
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(authLoading = false, authInfo = res.data) }
+                    onCodeSent()
+                }
                 is ApiResult.Error -> _uiState.update { it.copy(authLoading = false, authError = res.message) }
+            }
+        }
+    }
+
+    fun verifyPasswordResetCode(
+        email: String,
+        code: String,
+        onVerified: (recoveryAccessToken: String) -> Unit
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
+            when (val res = repository.verifyPasswordResetOtp(email, code)) {
+                is ApiResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            authLoading = false,
+                            authError = null,
+                            authInfo = "Code verified. Choose your new password."
+                        )
+                    }
+                    onVerified(res.data)
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(authLoading = false, authError = res.message) }
+                }
+            }
+        }
+    }
+
+    fun completePasswordReset(
+        recoveryAccessToken: String,
+        newPassword: String,
+        onSuccess: () -> Unit
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
+            when (val res = repository.completePasswordReset(recoveryAccessToken, newPassword)) {
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(authLoading = false, authError = null, authInfo = res.data) }
+                    showMessage(res.data)
+                    onSuccess()
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(authLoading = false, authError = res.message) }
+                }
+            }
+        }
+    }
+
+    fun savePendingOAuthPkce(verifier: String, state: String) {
+        viewModelScope.launch {
+            repository.sessionStore.savePendingPkce(verifier, state)
+        }
+    }
+
+    fun handleDeepLinkAuthCode(code: String, state: String?, onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(authLoading = true, authError = null, authInfo = null) }
+            when (val res = repository.exchangeMobileAuthCode(code, state)) {
+                is ApiResult.Success -> {
+                    val profile = refreshUserMetadataSync(res.data.userId)
+                    if (profile == null) {
+                        repository.signOut()
+                        val msg = "Could not verify your account status. Please sign in again."
+                        _uiState.update { it.copy(authLoading = false, authError = msg) }
+                        showMessage(msg)
+                    } else {
+                        _uiState.update { it.copy(authLoading = false, authError = null) }
+                        if (profile.banned != true) {
+                            showMessage("Signed in to Kart!")
+                            onSuccess()
+                        }
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(authLoading = false, authError = res.message) }
+                    showMessage(res.message)
+                }
             }
         }
     }
@@ -343,16 +487,51 @@ class SessionViewModel(
             when (val res = repository.refreshSessionWithToken(refreshToken)) {
                 is ApiResult.Success -> {
                     val profile = refreshUserMetadataSync(res.data.userId)
-                    _uiState.update { it.copy(authLoading = false, authError = null) }
-                    if (profile?.banned != true) {
-                        showMessage("Signed in to Kart!")
-                        onSuccess()
+                    if (profile == null) {
+                        repository.signOut()
+                        val msg = "Could not verify your account status. Please sign in again."
+                        _uiState.update { it.copy(authLoading = false, authError = msg) }
+                        showMessage(msg)
+                    } else {
+                        _uiState.update { it.copy(authLoading = false, authError = null) }
+                        if (profile.banned != true) {
+                            showMessage("Signed in to Kart!")
+                            onSuccess()
+                        }
                     }
                 }
                 is ApiResult.Error -> {
                     _uiState.update { it.copy(authLoading = false, authError = res.message) }
                     showMessage(res.message)
                 }
+            }
+        }
+    }
+
+    fun blockUser(targetUserId: String, reason: String = "", onDone: () -> Unit = {}) {
+        if (targetUserId.isBlank()) return
+        viewModelScope.launch {
+            when (val res = repository.blockUser(targetUserId, reason)) {
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(blockedUserIds = it.blockedUserIds + targetUserId) }
+                    showMessage("User blocked.")
+                    onDone()
+                }
+                is ApiResult.Error -> showMessage(res.message)
+            }
+        }
+    }
+
+    fun unblockUser(targetUserId: String, onDone: () -> Unit = {}) {
+        if (targetUserId.isBlank()) return
+        viewModelScope.launch {
+            when (val res = repository.unblockUser(targetUserId)) {
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(blockedUserIds = it.blockedUserIds - targetUserId) }
+                    showMessage("User unblocked.")
+                    onDone()
+                }
+                is ApiResult.Error -> showMessage(res.message)
             }
         }
     }
@@ -397,6 +576,31 @@ class SessionViewModel(
 
     fun setLanguage(lang: String) {
         viewModelScope.launch { repository.sessionStore.setLanguage(lang) }
+    }
+
+    fun setPushEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.sessionStore.setPushEnabled(enabled)
+            val uid = _uiState.value.session.userId
+            if (uid.isNotBlank()) {
+                repository.syncNotificationPreferences(enabled, emailNotifsEnabled.value)
+                if (!enabled) {
+                    repository.unregisterFcmToken()
+                } else {
+                    syncFcmToken(uid)
+                }
+            }
+        }
+    }
+
+    fun setEmailNotifsEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.sessionStore.setEmailNotifsEnabled(enabled)
+            val uid = _uiState.value.session.userId
+            if (uid.isNotBlank()) {
+                repository.syncNotificationPreferences(pushEnabled.value, enabled)
+            }
+        }
     }
 
     fun setNotificationPrefs(push: Boolean, email: Boolean) {

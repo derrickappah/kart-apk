@@ -62,10 +62,12 @@ async function getFcmAccessToken(sa: ServiceAccount): Promise<string> {
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  const maxLen = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < maxLen; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0;
+    const cb = i < b.length ? b.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
   }
   return diff === 0;
 }
@@ -108,16 +110,22 @@ Deno.serve(async (req: Request) => {
     let body: string = payload.body ?? "";
     let type: string = payload.type ?? "update";
     let deepLink: string = payload.deep_link ?? "/notifications";
+    let notificationId: string = String(payload.id ?? "");
+    let senderIdForBlockCheck: string | undefined = payload.sender_id;
 
     if (payload.table === "notifications" && payload.record) {
       userId = payload.record.user_id;
       title = payload.record.title ?? "Kart Update";
       body = payload.record.message ?? payload.record.body ?? "";
-      type = "update";
+      const recordType = String(payload.record.type ?? "").toLowerCase();
+      type = recordType.includes("message") || recordType.includes("chat") ? "message" : "update";
       deepLink = payload.record.link ?? "/notifications";
+      notificationId = String(payload.record.id ?? "");
+      senderIdForBlockCheck = payload.record.actor_id ?? payload.record.sender_id;
     } else if (payload.table === "messages" && payload.record) {
       const convId = payload.record.conversation_id;
       const senderId = payload.record.sender_id;
+      senderIdForBlockCheck = senderId;
       const { data: conv } = await supabase
         .from("conversations")
         .select("buyer_id, seller_id, participants")
@@ -138,13 +146,19 @@ Deno.serve(async (req: Request) => {
       }
       title = "New message on Kart";
       const rawContent = String(payload.record.content ?? "").trim();
-      body = rawContent.startsWith("[IMAGE:")
+      const strippedReply = rawContent.startsWith("[REPLY:")
+        ? rawContent.replace(/^\[REPLY:[^\]]*\]\s*/, "").trim()
+        : rawContent;
+      body = strippedReply.startsWith("[IMAGE:")
         ? "Sent you a photo"
-        : rawContent.startsWith("[VOICE:")
+        : strippedReply.startsWith("[VOICE:")
         ? "Sent you a voice message"
-        : (rawContent.slice(0, 180) || "You have a new message");
+        : strippedReply.startsWith("[PRODUCT:")
+        ? "Shared a product"
+        : (strippedReply.slice(0, 180) || "You have a new message");
       type = "message";
       deepLink = `/messages/${convId}`;
+      notificationId = String(payload.record.id ?? "chat_message");
     }
 
     if (!userId || !body) {
@@ -154,16 +168,30 @@ Deno.serve(async (req: Request) => {
     }
 
     // Respect banned status and notification opt-outs
-    const { data: recipientProfile } = await supabase
+    const { data: recipientProfile, error: profileError } = await supabase
       .from("profiles")
       .select("banned, push_notifications_enabled")
       .eq("id", userId)
       .maybeSingle();
 
-    if (recipientProfile?.banned === true || recipientProfile?.push_notifications_enabled === false) {
-      return new Response(JSON.stringify({ skipped: true, reason: "recipient_ineligible" }), {
+    if (profileError || recipientProfile?.banned === true || recipientProfile?.push_notifications_enabled === false) {
+      return new Response(JSON.stringify({ skipped: true, reason: profileError ? "profile_lookup_error" : "recipient_ineligible" }), {
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    if (senderIdForBlockCheck && senderIdForBlockCheck !== userId) {
+      const { data: blockRows } = await supabase
+        .from("user_blocks")
+        .select("id")
+        .eq("blocker_id", userId)
+        .eq("blocked_id", senderIdForBlockCheck)
+        .limit(1);
+      if (blockRows && blockRows.length > 0) {
+        return new Response(JSON.stringify({ skipped: true, reason: "blocked" }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
 
     const { data: tokens } = await supabase
@@ -191,13 +219,16 @@ Deno.serve(async (req: Request) => {
         body: JSON.stringify({
           message: {
             token: row.fcm_token,
-            notification: { title, body },
-            data: { title, body, type, deep_link: deepLink },
+            data: {
+              id: notificationId,
+              title,
+              body,
+              type,
+              deep_link: deepLink,
+              user_id: userId,
+            },
             android: {
               priority: "HIGH",
-              notification: {
-                channel_id: type === "message" ? "kart_messages" : "kart_updates",
-              },
             },
           },
         }),

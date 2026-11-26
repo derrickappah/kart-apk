@@ -42,6 +42,7 @@ credentials = "1.5.0"
 googleid = "1.1.1"
 coreSplashscreen = "1.0.1"
 lottieCompose = "6.6.2"
+zxingCore = "3.5.3"
 
 
 [libraries]
@@ -99,6 +100,7 @@ androidx-credentials-play-services = { group = "androidx.credentials", name = "c
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
 lottie-compose = { group = "com.airbnb.android", name = "lottie-compose", version.ref = "lottieCompose" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 
 
 [plugins]

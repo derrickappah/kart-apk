@@ -14,6 +14,8 @@ import com.example.domain.model.Product
 import com.example.domain.model.SubscriptionPlan
 import com.example.domain.model.UserSubscription
 import com.example.domain.model.Wallet
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,7 +27,15 @@ data class OrdersUiState(
     val orders: List<Order> = emptyList(),
     val selectedOrder: Order? = null,
     val hasPendingRefund: Boolean = false,
+    val hasApprovedRefund: Boolean = false,
     val hasReviewedOrder: Boolean = false,
+    val deliveryQr: com.example.data.repository.DeliveryQrData? = null,
+    val qrLoading: Boolean = false,
+    val qrError: String? = null,
+    val otpSending: Boolean = false,
+    val otpSent: Boolean = false,
+    val deliveryActionError: String? = null,
+    val deliveryActionNotice: String? = null,
     val actionLoading: Boolean = false,
     val error: String? = null,
     val feedback: String? = null
@@ -36,10 +46,13 @@ class OrdersViewModel(private val repository: KartRepository) : ViewModel() {
     val uiState: StateFlow<OrdersUiState> = _uiState.asStateFlow()
 
     private var lastOrdersAsSeller: Boolean? = null
+    private var loadOrdersJob: kotlinx.coroutines.Job? = null
+    private var loadOrderDetailJob: kotlinx.coroutines.Job? = null
 
     fun loadOrders(userId: String, asSeller: Boolean = false) {
         val modeChanged = lastOrdersAsSeller != asSeller
         lastOrdersAsSeller = asSeller
+        loadOrdersJob?.cancel()
         _uiState.update {
             it.copy(
                 loading = true,
@@ -47,7 +60,7 @@ class OrdersViewModel(private val repository: KartRepository) : ViewModel() {
                 error = null
             )
         }
-        viewModelScope.launch {
+        loadOrdersJob = viewModelScope.launch {
             when (val res = repository.fetchOrders(userId, asSeller)) {
                 is ApiResult.Success -> _uiState.update { it.copy(loading = false, orders = res.data) }
                 is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = res.message) }
@@ -57,22 +70,25 @@ class OrdersViewModel(private val repository: KartRepository) : ViewModel() {
 
     fun loadOrderDetail(orderId: String) {
         val isDifferentOrder = _uiState.value.selectedOrder?.id != orderId
+        loadOrderDetailJob?.cancel()
         _uiState.update {
             it.copy(
                 loading = true,
                 selectedOrder = if (isDifferentOrder) null else it.selectedOrder,
                 hasPendingRefund = if (isDifferentOrder) false else it.hasPendingRefund,
+                hasApprovedRefund = if (isDifferentOrder) false else it.hasApprovedRefund,
                 hasReviewedOrder = if (isDifferentOrder) false else it.hasReviewedOrder,
                 error = null
             )
         }
-        viewModelScope.launch {
+        loadOrderDetailJob = viewModelScope.launch {
             when (val res = repository.fetchOrderDetail(orderId)) {
                 is ApiResult.Success -> _uiState.update {
                     it.copy(
                         loading = false,
                         selectedOrder = res.data.order,
                         hasPendingRefund = res.data.hasPendingRefund,
+                        hasApprovedRefund = res.data.hasApprovedRefund,
                         hasReviewedOrder = res.data.hasReviewed
                     )
                 }
@@ -96,19 +112,108 @@ class OrdersViewModel(private val repository: KartRepository) : ViewModel() {
 
     fun sendDeliveryOtp(orderId: String) {
         viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    otpSending = true,
+                    deliveryActionError = null,
+                    deliveryActionNotice = null
+                )
+            }
             when (val res = repository.sendDeliveryOtp(orderId)) {
-                is ApiResult.Success -> _uiState.update { it.copy(feedback = "Delivery OTP sent to your verified contact.") }
-                is ApiResult.Error -> _uiState.update { it.copy(feedback = res.message) }
+                is ApiResult.Success -> _uiState.update {
+                    it.copy(
+                        otpSending = false,
+                        otpSent = true,
+                        deliveryActionError = null,
+                        deliveryActionNotice = "6-digit delivery OTP sent to your email. Check your inbox or spam folder."
+                    )
+                }
+                is ApiResult.Error -> _uiState.update {
+                    it.copy(
+                        otpSending = false,
+                        deliveryActionError = res.message,
+                        deliveryActionNotice = null
+                    )
+                }
             }
         }
     }
 
     fun confirmDelivery(orderId: String, code: String, mode: String, onSuccess: () -> Unit) {
         viewModelScope.launch {
-            _uiState.update { it.copy(actionLoading = true) }
+            _uiState.update {
+                it.copy(
+                    actionLoading = true,
+                    deliveryActionError = null,
+                    deliveryActionNotice = null
+                )
+            }
             when (val res = repository.confirmDelivery(orderId, code, mode)) {
                 is ApiResult.Success -> {
-                    _uiState.update { it.copy(actionLoading = false, feedback = "Delivery confirmed! Escrow released.") }
+                    _uiState.update {
+                        it.copy(
+                            actionLoading = false,
+                            otpSending = false,
+                            otpSent = false,
+                            deliveryActionError = null,
+                            deliveryActionNotice = null,
+                            feedback = "Delivery confirmed! Escrow released."
+                        )
+                    }
+                    loadOrderDetail(orderId)
+                    onSuccess()
+                }
+                is ApiResult.Error -> _uiState.update {
+                    it.copy(
+                        actionLoading = false,
+                        deliveryActionError = res.message,
+                        deliveryActionNotice = null,
+                        feedback = if (mode == "qr") res.message else it.feedback
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearDeliveryMessages() {
+        _uiState.update { it.copy(deliveryActionError = null, deliveryActionNotice = null) }
+    }
+
+    fun clearDeliveryModalState() {
+        _uiState.update {
+            it.copy(
+                otpSending = false,
+                otpSent = false,
+                deliveryActionError = null,
+                deliveryActionNotice = null
+            )
+        }
+    }
+
+    fun generateDeliveryQr(orderId: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(qrLoading = true, qrError = null) }
+            when (val res = repository.generateDeliveryQr(orderId)) {
+                is ApiResult.Success -> _uiState.update {
+                    it.copy(qrLoading = false, deliveryQr = res.data, qrError = null)
+                }
+                is ApiResult.Error -> _uiState.update {
+                    it.copy(qrLoading = false, qrError = res.message)
+                }
+            }
+        }
+    }
+
+    fun clearDeliveryQr() {
+        _uiState.update { it.copy(deliveryQr = null, qrLoading = false, qrError = null) }
+    }
+
+    fun cancelOrder(orderId: String, onSuccess: () -> Unit = {}) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(actionLoading = true) }
+            when (val res = repository.cancelOrder(orderId)) {
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(actionLoading = false, feedback = "Order cancelled.") }
                     loadOrderDetail(orderId)
                     onSuccess()
                 }
@@ -117,13 +222,14 @@ class OrdersViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
-    fun requestRefund(orderId: String, reason: String) {
+    fun requestRefund(orderId: String, reason: String, onSuccess: () -> Unit = {}) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
             when (val res = repository.requestRefund(orderId, reason)) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(actionLoading = false, feedback = "Refund request submitted.") }
                     loadOrderDetail(orderId)
+                    onSuccess()
                 }
                 is ApiResult.Error -> _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
             }
@@ -159,6 +265,9 @@ data class MessagesUiState(
     val loading: Boolean = true,
     val conversations: List<EnrichedConversation> = emptyList(),
     val activeMessages: List<MessageRow> = emptyList(),
+    val onlineUserIds: Set<String> = emptySet(),
+    val typingUsersByConversation: Map<String, Set<String>> = emptyMap(),
+    val pendingProductAttachment: Pair<String, Product>? = null,
     val sending: Boolean = false,
     val error: String? = null,
     val feedback: String? = null
@@ -170,12 +279,167 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
 
     private var cachedUserId: String? = null
     private val messagesCache = mutableMapOf<String, List<MessageRow>>()
+    private var loadThreadJob: Job? = null
+    private val realtimeClient = com.example.data.remote.SupabaseRealtimeClient()
+    private var realtimeEventsJob: Job? = null
+    private var presenceJob: Job? = null
+    private var typingEventsJob: Job? = null
+    private var typingStopDebounceJob: Job? = null
+    private val remoteTypingExpiryJobs = mutableMapOf<Pair<String, String>, Job>()
+    private var lastTypingSentAtMs = 0L
+    private var isLocallyTyping = false
+    private var realtimeConnectedUserId: String? = null
+
+    fun startRealtime(userId: String) {
+        if (userId.isBlank() || realtimeConnectedUserId == userId) return
+        realtimeConnectedUserId = userId
+        realtimeEventsJob?.cancel()
+        presenceJob?.cancel()
+        typingEventsJob?.cancel()
+        realtimeEventsJob = viewModelScope.launch {
+            val token = repository.sessionStore.currentSession().accessToken
+            if (token.isBlank()) {
+                realtimeConnectedUserId = null
+                return@launch
+            }
+            realtimeClient.connect(token, userId = userId) {
+                repository.sessionStore.currentSession().accessToken
+            }
+            presenceJob = launch {
+                realtimeClient.onlineUserIds.collect { ids ->
+                    _uiState.update { it.copy(onlineUserIds = ids) }
+                }
+            }
+            typingEventsJob = launch {
+                realtimeClient.typingEvents.collect { event ->
+                    if (event.userId == cachedUserId || event.userId == realtimeConnectedUserId) return@collect
+                    val key = event.conversationId to event.userId
+                    remoteTypingExpiryJobs.remove(key)?.cancel()
+                    updateTypingUser(event.conversationId, event.userId, event.isTyping)
+                    if (event.isTyping) {
+                        remoteTypingExpiryJobs[key] = launch {
+                            delay(5_000L)
+                            remoteTypingExpiryJobs.remove(key)
+                            updateTypingUser(event.conversationId, event.userId, false)
+                        }
+                    }
+                }
+            }
+            realtimeClient.messageEvents.collect { convId ->
+                clearConversationTyping(convId)
+                if (activeThreadId == convId) {
+                    loadThread(convId, silent = true)
+                }
+                cachedUserId?.takeIf { it.isNotBlank() }?.let { uid ->
+                    loadConversations(uid)
+                }
+            }
+        }
+    }
+
+    private fun updateTypingUser(conversationId: String, userId: String, isTyping: Boolean) {
+        _uiState.update { state ->
+            val currentSet = state.typingUsersByConversation[conversationId].orEmpty()
+            val nextSet = if (isTyping) currentSet + userId else currentSet - userId
+            val nextMap = if (nextSet.isEmpty()) {
+                state.typingUsersByConversation - conversationId
+            } else {
+                state.typingUsersByConversation + (conversationId to nextSet)
+            }
+            state.copy(typingUsersByConversation = nextMap)
+        }
+    }
+
+    private fun clearConversationTyping(conversationId: String) {
+        val keysToCancel = remoteTypingExpiryJobs.keys.filter { it.first == conversationId }
+        keysToCancel.forEach { remoteTypingExpiryJobs.remove(it)?.cancel() }
+        _uiState.update { state ->
+            if (conversationId !in state.typingUsersByConversation) state
+            else state.copy(typingUsersByConversation = state.typingUsersByConversation - conversationId)
+        }
+    }
+
+    fun enterConversation(conversationId: String) {
+        realtimeClient.joinConversationChannel(conversationId)
+    }
+
+    fun leaveConversation(conversationId: String, currentUserId: String) {
+        stopTyping(conversationId, currentUserId)
+        realtimeClient.leaveConversationChannel(conversationId)
+    }
+
+    fun onTypingInputChanged(conversationId: String, currentUserId: String, text: String) {
+        if (conversationId.isBlank() || currentUserId.isBlank()) return
+        if (text.isBlank()) {
+            stopTyping(conversationId, currentUserId)
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (!isLocallyTyping || (now - lastTypingSentAtMs) >= 2_000L) {
+            isLocallyTyping = true
+            lastTypingSentAtMs = now
+            realtimeClient.sendTyping(conversationId, currentUserId, true)
+        }
+        typingStopDebounceJob?.cancel()
+        typingStopDebounceJob = viewModelScope.launch {
+            delay(3_000L)
+            stopTyping(conversationId, currentUserId)
+        }
+    }
+
+    fun stopTyping(conversationId: String, currentUserId: String) {
+        typingStopDebounceJob?.cancel()
+        typingStopDebounceJob = null
+        if (isLocallyTyping) {
+            isLocallyTyping = false
+            lastTypingSentAtMs = 0L
+            if (conversationId.isNotBlank() && currentUserId.isNotBlank()) {
+                realtimeClient.sendTyping(conversationId, currentUserId, false)
+            }
+        }
+    }
+
+    fun stopRealtime() {
+        realtimeConnectedUserId = null
+        realtimeEventsJob?.cancel()
+        realtimeEventsJob = null
+        presenceJob?.cancel()
+        presenceJob = null
+        typingEventsJob?.cancel()
+        typingEventsJob = null
+        typingStopDebounceJob?.cancel()
+        typingStopDebounceJob = null
+        remoteTypingExpiryJobs.values.forEach { it.cancel() }
+        remoteTypingExpiryJobs.clear()
+        isLocallyTyping = false
+        lastTypingSentAtMs = 0L
+        realtimeClient.disconnect()
+        _uiState.update {
+            it.copy(
+                onlineUserIds = emptySet(),
+                typingUsersByConversation = emptyMap()
+            )
+        }
+    }
+
+    override fun onCleared() {
+        stopRealtime()
+        super.onCleared()
+    }
 
     fun loadConversations(userId: String) {
         val isSameUser = cachedUserId == userId
         if (!isSameUser) {
             cachedUserId = userId
             messagesCache.clear()
+            activeThreadId = null
+            _uiState.update {
+                it.copy(
+                    conversations = emptyList(),
+                    activeMessages = emptyList(),
+                    pendingProductAttachment = null
+                )
+            }
         }
         val hasCachedConversations = isSameUser && _uiState.value.conversations.isNotEmpty()
         if (!hasCachedConversations) {
@@ -235,7 +499,8 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
             .lastOrNull { it.id?.startsWith("local_") != true && !it.createdAt.isNullOrBlank() }
             ?.createdAt
 
-        viewModelScope.launch {
+        loadThreadJob?.cancel()
+        loadThreadJob = viewModelScope.launch {
             when (val res = repository.fetchMessagesForConversation(conversationId, afterCreatedAt = lastServerCreatedAt)) {
                 is ApiResult.Success -> {
                     val incoming = res.data
@@ -269,20 +534,85 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
-    fun sendMessage(conversationId: String, senderId: String, text: String) {
-        sendMessageInternal(conversationId, senderId, text, allowMediaMarker = false)
+    fun stageProductAttachment(conversationId: String, product: Product) {
+        _uiState.update { it.copy(pendingProductAttachment = conversationId to product) }
+    }
+
+    fun clearPendingProductAttachment(conversationId: String? = null) {
+        _uiState.update { state ->
+            if (conversationId == null || state.pendingProductAttachment?.first == conversationId) {
+                state.copy(pendingProductAttachment = null)
+            } else {
+                state
+            }
+        }
+    }
+
+    fun sendMessage(
+        conversationId: String,
+        senderId: String,
+        text: String,
+        onFailure: () -> Unit = {}
+    ) {
+        sendMessageInternal(conversationId, senderId, text, allowMediaMarker = false, onFailure = onFailure)
+    }
+
+    fun sendReplyMessage(
+        conversationId: String,
+        senderId: String,
+        replyToId: String,
+        replySenderName: String,
+        replySnippet: String,
+        text: String,
+        onFailure: () -> Unit = {}
+    ) {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return
+        val encoded = com.example.domain.model.KartFormatters.encodeMessageReply(
+            replyToId = replyToId,
+            senderName = replySenderName,
+            snippet = replySnippet,
+            body = trimmed
+        )
+        sendMessageInternal(conversationId, senderId, encoded, allowMediaMarker = true, onFailure = onFailure)
+    }
+
+    fun sendProductMessage(
+        conversationId: String,
+        senderId: String,
+        product: Product,
+        caption: String = "",
+        onFailure: () -> Unit = {}
+    ) {
+        val encoded = com.example.domain.model.KartFormatters.encodeMessageProduct(product, caption)
+        clearPendingProductAttachment(conversationId)
+        sendMessageInternal(
+            conversationId = conversationId,
+            senderId = senderId,
+            text = encoded,
+            allowMediaMarker = true,
+            onFailure = {
+                stageProductAttachment(conversationId, product)
+                onFailure()
+            }
+        )
     }
 
     private fun sendMessageInternal(
         conversationId: String,
         senderId: String,
         text: String,
-        allowMediaMarker: Boolean
+        allowMediaMarker: Boolean,
+        onFailure: () -> Unit = {}
     ) {
         val trimmed = text.trim()
-        if (trimmed.isBlank()) return
+        if (trimmed.isBlank()) {
+            _uiState.update { it.copy(sending = false) }
+            return
+        }
         if (trimmed.length > 2000) {
             _uiState.update { it.copy(sending = false, feedback = "Message is too long (maximum 2,000 characters).") }
+            onFailure()
             return
         }
         val localId = "local_${java.util.UUID.randomUUID()}"
@@ -294,34 +624,66 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
             createdAt = java.time.Instant.now().toString(),
             isRead = false
         )
-        _uiState.update { it.copy(activeMessages = it.activeMessages + optimistic) }
+        _uiState.update { state ->
+            if (activeThreadId == conversationId) {
+                state.copy(activeMessages = state.activeMessages + optimistic)
+            } else {
+                state
+            }
+        }
         bumpConversationToTop(conversationId, optimistic)
 
         viewModelScope.launch {
-            when (val res = repository.sendMessage(conversationId, senderId, trimmed, allowMediaMarker = allowMediaMarker)) {
-                is ApiResult.Success -> {
-                    val serverMsg = res.data
-                    val cached = messagesCache[conversationId].orEmpty()
-                    if (cached.none { it.id == serverMsg.id }) {
-                        messagesCache[conversationId] = cached + serverMsg
-                    }
-                    _uiState.update { state ->
-                        val withoutDuplicate = state.activeMessages.filterNot {
-                            it.id == serverMsg.id && it.id != localId
+            try {
+                when (val res = repository.sendMessage(conversationId, senderId, trimmed, allowMediaMarker = allowMediaMarker)) {
+                    is ApiResult.Success -> {
+                        val serverMsg = res.data
+                        val cached = messagesCache[conversationId].orEmpty()
+                        if (cached.none { it.id == serverMsg.id }) {
+                            messagesCache[conversationId] = cached + serverMsg
                         }
-                        val updated = withoutDuplicate.map { if (it.id == localId) serverMsg else it }
-                        state.copy(sending = false, activeMessages = updated)
+                        _uiState.update { state ->
+                            if (activeThreadId != conversationId) {
+                                state.copy(sending = false)
+                            } else {
+                                val withoutDuplicate = state.activeMessages.filterNot {
+                                    it.id == serverMsg.id && it.id != localId
+                                }
+                                val updated = withoutDuplicate.map { if (it.id == localId) serverMsg else it }
+                                state.copy(sending = false, activeMessages = updated)
+                            }
+                        }
+                    }
+                    is ApiResult.Error -> {
+                        _uiState.update { state ->
+                            val updatedMessages = if (activeThreadId == conversationId) {
+                                state.activeMessages.filterNot { it.id == localId }
+                            } else {
+                                state.activeMessages
+                            }
+                            state.copy(
+                                sending = false,
+                                activeMessages = updatedMessages,
+                                feedback = res.message
+                            )
+                        }
+                        onFailure()
                     }
                 }
-                is ApiResult.Error -> {
-                    _uiState.update { state ->
-                        state.copy(
-                            sending = false,
-                            activeMessages = state.activeMessages.filterNot { it.id == localId },
-                            feedback = res.message
-                        )
+            } catch (e: Exception) {
+                _uiState.update { state ->
+                    val updatedMessages = if (activeThreadId == conversationId) {
+                        state.activeMessages.filterNot { it.id == localId }
+                    } else {
+                        state.activeMessages
                     }
+                    state.copy(
+                        sending = false,
+                        activeMessages = updatedMessages,
+                        feedback = e.localizedMessage ?: "Failed to send message."
+                    )
                 }
+                onFailure()
             }
         }
     }
@@ -329,11 +691,20 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
     fun sendImageMessage(conversationId: String, senderId: String, resolver: ContentResolver, uri: Uri) {
         viewModelScope.launch {
             _uiState.update { it.copy(sending = true) }
-            when (val upload = repository.uploadImageUri(resolver, uri, bucket = "chat-media", isPrivate = true)) {
-                is ApiResult.Success -> {
-                    sendMessageInternal(conversationId, senderId, "[IMAGE:${upload.data}]", allowMediaMarker = true)
+            try {
+                when (val upload = repository.uploadImageUri(resolver, uri, bucket = "chat-media", isPrivate = true)) {
+                    is ApiResult.Success -> {
+                        val url = upload.data.trim()
+                        if (url.isBlank()) {
+                            _uiState.update { it.copy(sending = false, feedback = "Image upload returned an empty URL.") }
+                        } else {
+                            sendMessageInternal(conversationId, senderId, "[IMAGE:$url]", allowMediaMarker = true)
+                        }
+                    }
+                    is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
                 }
-                is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(sending = false, feedback = e.localizedMessage ?: "Image upload failed.") }
             }
         }
     }
@@ -344,16 +715,23 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
             try {
                 when (val upload = repository.uploadAudioFile(audioFile, bucket = "chat-media", isPrivate = true)) {
                     is ApiResult.Success -> {
-                        val safeDuration = durationSeconds.coerceIn(1, 600)
-                        sendMessageInternal(
-                            conversationId,
-                            senderId,
-                            "[VOICE:${upload.data}|$safeDuration]",
-                            allowMediaMarker = true
-                        )
+                        val url = upload.data.trim()
+                        if (url.isBlank()) {
+                            _uiState.update { it.copy(sending = false, feedback = "Voice upload returned an empty URL.") }
+                        } else {
+                            val safeDuration = durationSeconds.coerceIn(1, 600)
+                            sendMessageInternal(
+                                conversationId,
+                                senderId,
+                                "[VOICE:$url|$safeDuration]",
+                                allowMediaMarker = true
+                            )
+                        }
                     }
                     is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
                 }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(sending = false, feedback = e.localizedMessage ?: "Voice upload failed.") }
             } finally {
                 runCatching { audioFile.delete() }
             }
@@ -380,6 +758,7 @@ data class WalletUiState(
     val plans: List<SubscriptionPlan> = emptyList(),
     val activeSubscription: UserSubscription? = null,
     val actionLoading: Boolean = false,
+    val subscribingPlanId: String? = null,
     val error: String? = null,
     val feedback: String? = null
 )
@@ -439,13 +818,15 @@ class WalletViewModel(private val repository: KartRepository) : ViewModel() {
 
     fun subscribe(planId: String, onUrlOrDone: (String) -> Unit) {
         viewModelScope.launch {
-            _uiState.update { it.copy(actionLoading = true) }
+            _uiState.update { it.copy(actionLoading = true, subscribingPlanId = planId) }
             when (val res = repository.subscribeToPlan(planId)) {
                 is ApiResult.Success -> {
-                    _uiState.update { it.copy(actionLoading = false) }
+                    _uiState.update { it.copy(actionLoading = false, subscribingPlanId = null) }
                     onUrlOrDone(res.data)
                 }
-                is ApiResult.Error -> _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
+                is ApiResult.Error -> _uiState.update {
+                    it.copy(actionLoading = false, subscribingPlanId = null, feedback = res.message)
+                }
             }
         }
     }
@@ -479,6 +860,9 @@ data class SellerUiState(
 class SellerViewModel(private val repository: KartRepository) : ViewModel() {
     private val _uiState = MutableStateFlow(SellerUiState())
     val uiState: StateFlow<SellerUiState> = _uiState.asStateFlow()
+
+    // Caches successfully uploaded local URIs across retries so failed publishes don't duplicate storage files
+    private val uploadedUriCache = mutableMapOf<String, String>()
 
     fun loadSellerHub(userId: String) {
         viewModelScope.launch {
@@ -522,11 +906,20 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
             _uiState.update { it.copy(actionLoading = true) }
             val uploadedUrls = existingUrls.toMutableList()
             for (uri in newImageUris) {
-                when (val up = repository.uploadImageUri(resolver, uri, bucket = "products")) {
-                    is ApiResult.Success -> uploadedUrls.add(up.data)
-                    is ApiResult.Error -> {
-                        _uiState.update { it.copy(actionLoading = false, feedback = up.message) }
-                        return@launch
+                val uriKey = uri.toString()
+                val cachedUrl = uploadedUriCache[uriKey]
+                if (!cachedUrl.isNullOrBlank()) {
+                    uploadedUrls.add(cachedUrl)
+                } else {
+                    when (val up = repository.uploadImageUri(resolver, uri, bucket = "products")) {
+                        is ApiResult.Success -> {
+                            uploadedUriCache[uriKey] = up.data
+                            uploadedUrls.add(up.data)
+                        }
+                        is ApiResult.Error -> {
+                            _uiState.update { it.copy(actionLoading = false, feedback = up.message) }
+                            return@launch
+                        }
                     }
                 }
             }
@@ -549,6 +942,7 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
             }
             when (result) {
                 is ApiResult.Success -> {
+                    uploadedUriCache.clear()
                     _uiState.update { it.copy(actionLoading = false) }
                     loadSellerHub(sellerId)
                     onSuccess(result.data.id)

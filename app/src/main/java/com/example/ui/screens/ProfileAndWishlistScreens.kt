@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import kotlinx.coroutines.launch
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,11 +29,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
@@ -96,6 +100,7 @@ fun ProfileScreen(
     currentUserId: String?,
     viewModel: ProfileViewModel,
     wishlistIds: Set<String>,
+    blockedUserIds: Set<String> = emptySet(),
     isEmbeddedTab: Boolean,
     onBack: () -> Unit,
     onRequireAuth: () -> Unit,
@@ -111,7 +116,10 @@ fun ProfileScreen(
     onSignOut: () -> Unit,
     onProductClick: (Product) -> Unit,
     onWishlistToggle: (String) -> Unit,
-    onOpenUserProfile: (String) -> Unit
+    onOpenUserProfile: (String) -> Unit,
+    onBlockUser: (String, () -> Unit) -> Unit = { _, _ -> },
+    onUnblockUser: (String, () -> Unit) -> Unit = { _, _ -> },
+    onShowMessage: (String) -> Unit = {}
 ) {
     val resolvedId = targetUserId ?: currentUserId
     if (resolvedId.isNullOrBlank()) {
@@ -136,11 +144,19 @@ fun ProfileScreen(
     val context = LocalContext.current
     val tokens = KartThemeTokens.colors
     val isOwnProfile = resolvedId == currentUserId
+    val isTargetBlocked = !isOwnProfile && resolvedId in blockedUserIds
     var activeTab by remember { mutableStateOf("listings") }
     var followSheetType by remember { mutableStateOf<String?>(null) }
+    var showBlockConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(resolvedId, currentUserId) {
         viewModel.loadProfile(resolvedId, currentUserId)
+    }
+    LaunchedEffect(state.feedback) {
+        state.feedback?.let {
+            onShowMessage(it)
+            viewModel.clearFeedback()
+        }
     }
 
     Column(
@@ -266,24 +282,53 @@ fun ProfileScreen(
                             }
 
                             if (!isOwnProfile) {
-                                if (bundle.isFollowing) {
-                                    KartSecondaryButton(
-                                        text = "Following",
+                                if (isTargetBlocked) {
+                                    KartOutlineButton(
+                                        text = "Unblock User",
+                                        borderColor = KartDanger,
+                                        contentColor = KartDanger,
                                         onClick = {
                                             if (currentUserId == null) onRequireAuth()
-                                            else viewModel.toggleFollow(resolvedId, currentUserId)
+                                            else onUnblockUser(resolvedId) {
+                                                viewModel.loadProfile(resolvedId, currentUserId)
+                                            }
                                         },
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 } else {
-                                    KartPrimaryButton(
-                                        text = "Follow Seller",
-                                        onClick = {
-                                            if (currentUserId == null) onRequireAuth()
-                                            else viewModel.toggleFollow(resolvedId, currentUserId)
-                                        },
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                                         modifier = Modifier.fillMaxWidth()
-                                    )
+                                    ) {
+                                        if (bundle.isFollowing) {
+                                            KartSecondaryButton(
+                                                text = "Following",
+                                                onClick = {
+                                                    if (currentUserId == null) onRequireAuth()
+                                                    else viewModel.toggleFollow(resolvedId, currentUserId)
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        } else {
+                                            KartPrimaryButton(
+                                                text = "Follow Seller",
+                                                onClick = {
+                                                    if (currentUserId == null) onRequireAuth()
+                                                    else viewModel.toggleFollow(resolvedId, currentUserId)
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                        KartOutlineButton(
+                                            text = "Block",
+                                            borderColor = KartDanger,
+                                            contentColor = KartDanger,
+                                            onClick = {
+                                                if (currentUserId == null) onRequireAuth()
+                                                else showBlockConfirm = true
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -404,10 +449,36 @@ fun ProfileScreen(
                 }
             }
 
+            if (showBlockConfirm) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { showBlockConfirm = false },
+                    title = { Text("Block ${profile.resolvedName}?", fontWeight = FontWeight.Bold) },
+                    text = {
+                        Text("Blocking removes any mutual follows and prevents this user from messaging or following you.")
+                    },
+                    confirmButton = {
+                        KartPrimaryButton(
+                            text = "Block User",
+                            containerColor = KartDanger,
+                            onClick = {
+                                showBlockConfirm = false
+                                onBlockUser(resolvedId) {
+                                    viewModel.loadProfile(resolvedId, currentUserId)
+                                }
+                            }
+                        )
+                    },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(onClick = { showBlockConfirm = false }) { Text("Cancel") }
+                    }
+                )
+            }
+
             followSheetType?.let { type ->
                 FollowersListSheet(
                     title = if (type == "followers") "Followers" else "Following",
                     users = state.followList,
+                    isLoading = state.followListLoading,
                     onUserClick = onOpenUserProfile,
                     onDismiss = { followSheetType = null }
                 )
@@ -483,8 +554,23 @@ fun EditProfileScreen(
     var displayName by remember(initialProfile) { mutableStateOf(initialProfile?.displayName.orEmpty()) }
     var username by remember(initialProfile) { mutableStateOf(initialProfile?.username.orEmpty()) }
     var bio by remember(initialProfile) { mutableStateOf(initialProfile?.bio.orEmpty()) }
-    var campus by remember(initialProfile, availableCampuses) {
-        mutableStateOf(initialProfile?.campus ?: availableCampuses.first())
+    var campusQuery by remember(initialProfile) {
+        mutableStateOf(initialProfile?.campus.orEmpty())
+    }
+    var showCampusSuggestions by remember { mutableStateOf(false) }
+    val editListState = rememberLazyListState()
+    val matchingCampuses = remember(campusQuery, availableCampuses) {
+        val q = campusQuery.trim()
+        if (q.isEmpty()) availableCampuses.take(5)
+        else availableCampuses.filter { c ->
+            c.contains(q, ignoreCase = true) ||
+                KartFormatters.abbreviateCampus(c).contains(q, ignoreCase = true)
+        }.take(6)
+    }
+    LaunchedEffect(showCampusSuggestions, campusQuery) {
+        if (showCampusSuggestions) {
+            editListState.animateScrollToItem(4)
+        }
     }
     var phone by remember(initialProfile) { mutableStateOf(initialProfile?.phone.orEmpty()) }
     var instagram by remember(initialProfile) { mutableStateOf(initialProfile?.instagramUrl.orEmpty()) }
@@ -515,8 +601,12 @@ fun EditProfileScreen(
         KartSubScreenTopBar(title = "Edit Profile", onBack = onBack)
 
         LazyColumn(
+            state = editListState,
             contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier
+                .weight(1f)
+                .imePadding()
         ) {
             item {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
@@ -540,11 +630,121 @@ fun EditProfileScreen(
             item { KartTextField(username, { username = it }, "Username", placeholder = "kwame_ug") }
             item { KartTextField(bio, { bio = it }, "Bio", placeholder = "Computer Science student selling tech & books", singleLine = false, maxLines = 3) }
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Campus", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        availableCampuses.forEach { c ->
-                            KartChip(c, campus == c, { campus = c })
+                val tokens = KartThemeTokens.colors
+                val trimmedQuery = campusQuery.trim()
+                val normalizedCustomCampus = trimmedQuery.uppercase(java.util.Locale.US)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    KartTextField(
+                        value = campusQuery,
+                        onValueChange = {
+                            campusQuery = it
+                            showCampusSuggestions = true
+                        },
+                        label = "Campus",
+                        placeholder = "Search or enter your campus...",
+                        leadingIcon = {
+                            Icon(
+                                imageVector = KartLucideIcons.Search,
+                                contentDescription = null,
+                                tint = tokens.textMuted,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        trailingIcon = if (campusQuery.isNotEmpty()) {
+                            {
+                                IconButton(
+                                    onClick = {
+                                        campusQuery = ""
+                                        showCampusSuggestions = true
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = KartLucideIcons.X,
+                                        contentDescription = "Clear campus",
+                                        tint = tokens.textMuted,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+                        } else null,
+                        modifier = Modifier.onFocusChanged { focusState ->
+                            if (focusState.isFocused) {
+                                showCampusSuggestions = true
+                            }
+                        }
+                    )
+                    if (showCampusSuggestions) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(MaterialTheme.colorScheme.surface)
+                                .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
+                        ) {
+                            if (matchingCampuses.isNotEmpty()) {
+                                matchingCampuses.forEachIndexed { idx, match ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                campusQuery = match
+                                                showCampusSuggestions = false
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = KartLucideIcons.MapPin,
+                                            contentDescription = null,
+                                            tint = KartPrimary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Text(
+                                            text = match,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = tokens.textPrimary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    if (idx < matchingCampuses.lastIndex) {
+                                        HorizontalDivider(color = tokens.cardBorder)
+                                    }
+                                }
+                            } else {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            campusQuery = normalizedCustomCampus
+                                            showCampusSuggestions = false
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = KartLucideIcons.Plus,
+                                        contentDescription = null,
+                                        tint = KartPrimary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "No matching campus found",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = tokens.textSecondary
+                                        )
+                                        Text(
+                                            text = "Use \"$normalizedCustomCampus\"",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = KartPrimary
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -567,8 +767,17 @@ fun EditProfileScreen(
                 KartPrimaryButton(
                     text = "Save Profile",
                     loading = state.actionLoading,
+                    enabled = displayName.trim().length >= 2 && !state.actionLoading,
                     onClick = {
-                        viewModel.saveProfile(userId, displayName, username, bio, campus, phone, instagram, snapchat, whatsapp, avatarUrl, onSaved)
+                        if (displayName.trim().length < 2) {
+                            onShowMessage("Display name must be at least 2 characters.")
+                            return@KartPrimaryButton
+                        }
+                        val trimmedCampus = campusQuery.trim()
+                        val resolvedCampus = availableCampuses.firstOrNull {
+                            it.equals(trimmedCampus, ignoreCase = true)
+                        } ?: trimmedCampus.uppercase(java.util.Locale.US)
+                        viewModel.saveProfile(userId, displayName, username, bio, resolvedCampus, phone, instagram, snapchat, whatsapp, avatarUrl, onSaved)
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -628,6 +837,18 @@ fun WishlistScreen(
                     repeat(3) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(110.dp)) }
                 }
             }
+            state.error != null && state.wishlist.isEmpty() -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.ERROR,
+                    title = "Could not load wishlist",
+                    subtitle = state.error ?: "Check your connection and try again.",
+                    actionLabel = "Retry",
+                    onActionClick = { viewModel.loadWishlist(userId) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
+            }
             products.isEmpty() -> {
                 EmptyStateView(
                     asset = EmptyStateAsset.WISHLIST,
@@ -672,7 +893,9 @@ fun NotificationsScreen(
     userId: String,
     viewModel: ProfileViewModel,
     onBack: () -> Unit,
-    onNotificationClick: (com.example.domain.model.NotificationItem) -> Unit = {}
+    onNotificationClick: (com.example.domain.model.NotificationItem) -> Unit = {},
+    onShowMessage: (String) -> Unit = {},
+    onMarkedAllRead: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tokens = KartThemeTokens.colors
@@ -680,6 +903,12 @@ fun NotificationsScreen(
     val easeOutStrong = remember { androidx.compose.animation.core.CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
 
     LaunchedEffect(userId) { viewModel.loadNotifications(userId) }
+    LaunchedEffect(state.feedback) {
+        state.feedback?.let {
+            onShowMessage(it)
+            viewModel.clearFeedback()
+        }
+    }
 
     val unreadCount = remember(state.notifications) { state.notifications.count { it.isRead != true } }
     val visibleNotifications = remember(state.notifications, unreadOnly) {
@@ -703,9 +932,7 @@ fun NotificationsScreen(
                             .clip(RoundedCornerShape(999.dp))
                             .background(KartPrimary.copy(alpha = 0.12f))
                             .clickable {
-                                state.notifications
-                                    .filter { it.isRead != true }
-                                    .forEach { viewModel.markNotificationRead(it.id) }
+                                viewModel.markAllNotificationsRead(userId, onDone = onMarkedAllRead)
                             }
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
@@ -770,6 +997,18 @@ fun NotificationsScreen(
                         )
                     }
                 }
+            }
+            state.error != null && state.notifications.isEmpty() -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.ERROR,
+                    title = "Could not load notifications",
+                    subtitle = state.error ?: "Check your connection and try again.",
+                    actionLabel = "Retry",
+                    onActionClick = { viewModel.loadNotifications(userId) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
             }
             visibleNotifications.isEmpty() -> {
                 EmptyStateView(
@@ -1251,39 +1490,58 @@ private fun AvatarCropDialog(
                 onClick = onCancel,
                 modifier = Modifier.weight(1f)
             )
+            val cropScope = androidx.compose.runtime.rememberCoroutineScope()
+            var cropping by remember { mutableStateOf(false) }
             KartPrimaryButton(
                 text = "Use Photo",
-                enabled = bitmap != null,
+                loading = cropping,
+                enabled = bitmap != null && !cropping,
                 onClick = {
                     val src = bitmap ?: return@KartPrimaryButton
-                    val outSize = 512
-                    val outBmp = android.graphics.Bitmap.createBitmap(
-                        outSize,
-                        outSize,
-                        android.graphics.Bitmap.Config.ARGB_8888
-                    )
-                    val canvas = android.graphics.Canvas(outBmp)
-                    val viewSize = cropSizePx.coerceAtLeast(1f)
-                    val baseScale = maxOf(
-                        outSize.toFloat() / src.width.toFloat(),
-                        outSize.toFloat() / src.height.toFloat()
-                    )
-                    val totalScale = baseScale * scale
-                    val dx = (outSize - src.width * totalScale) / 2f + (offsetX * (outSize / viewSize))
-                    val dy = (outSize - src.height * totalScale) / 2f + (offsetY * (outSize / viewSize))
-                    val matrix = android.graphics.Matrix().apply {
-                        postScale(totalScale, totalScale)
-                        postTranslate(dx, dy)
-                    }
-                    val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
-                    canvas.drawBitmap(src, matrix, paint)
+                    cropping = true
+                    cropScope.launch {
+                        val savedUri = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching {
+                                val outSize = 512
+                                val outBmp = android.graphics.Bitmap.createBitmap(
+                                    outSize,
+                                    outSize,
+                                    android.graphics.Bitmap.Config.ARGB_8888
+                                )
+                                try {
+                                    val canvas = android.graphics.Canvas(outBmp)
+                                    val viewSize = cropSizePx.coerceAtLeast(1f)
+                                    val baseScale = maxOf(
+                                        outSize.toFloat() / src.width.toFloat(),
+                                        outSize.toFloat() / src.height.toFloat()
+                                    )
+                                    val totalScale = baseScale * scale
+                                    val dx = (outSize - src.width * totalScale) / 2f + (offsetX * (outSize / viewSize))
+                                    val dy = (outSize - src.height * totalScale) / 2f + (offsetY * (outSize / viewSize))
+                                    val matrix = android.graphics.Matrix().apply {
+                                        postScale(totalScale, totalScale)
+                                        postTranslate(dx, dy)
+                                    }
+                                    val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+                                    canvas.drawBitmap(src, matrix, paint)
 
-                    val outFile = java.io.File(context.cacheDir, "avatar_crop_${System.currentTimeMillis()}.jpg")
-                    java.io.FileOutputStream(outFile).use { fos ->
-                        outBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, fos)
+                                    val outFile = java.io.File(context.cacheDir, "avatar_crop_${System.currentTimeMillis()}.jpg")
+                                    java.io.FileOutputStream(outFile).use { fos ->
+                                        outBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, fos)
+                                    }
+                                    Uri.fromFile(outFile)
+                                } finally {
+                                    outBmp.recycle()
+                                }
+                            }.getOrNull()
+                        }
+                        cropping = false
+                        if (savedUri != null) {
+                            onCropped(savedUri)
+                        } else {
+                            onCancel()
+                        }
                     }
-                    outBmp.recycle()
-                    onCropped(Uri.fromFile(outFile))
                 },
                 modifier = Modifier.weight(1f)
             )

@@ -60,10 +60,14 @@ object KartNotificationHelper {
         }
         val raw = deepLink?.trim().orEmpty()
         if (raw.isBlank()) return fallback
-        val candidate = if (raw.startsWith("http://", true) || raw.startsWith("https://", true) || raw.contains("://")) {
-            raw
-        } else {
-            "https://www.kart.cx/${raw.trimStart('/')}"
+        val candidate = when {
+            raw.startsWith("kart-app://", ignoreCase = true) -> {
+                val remainder = raw.substring("kart-app://".length).trimStart('/')
+                if (remainder.isBlank()) return fallback
+                "https://www.kart.cx/$remainder"
+            }
+            raw.startsWith("http://", true) || raw.startsWith("https://", true) || raw.contains("://") -> raw
+            else -> "https://www.kart.cx/${raw.trimStart('/')}"
         }
         val parsed = runCatching { java.net.URI(candidate) }.getOrNull() ?: return fallback
 

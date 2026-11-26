@@ -18,7 +18,10 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -114,16 +117,30 @@ fun KartAppRoot(
     }
     val isOnline by networkMonitor.isOnline.collectAsStateWithLifecycle()
 
+    var askedNotifPermThisSession by rememberSaveable { mutableStateOf(false) }
     val notifPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
-    ) { /* handled silently */ }
+    ) { granted ->
+        if (!granted) {
+            sessionViewModel.setPushEnabled(false)
+        }
+    }
+
+    LaunchedEffect(sessionState.isLoggedIn, sessionState.session.userId) {
+        if (sessionState.isLoggedIn && sessionState.session.userId.isNotBlank()) {
+            messagesVm.startRealtime(sessionState.session.userId)
+        } else {
+            messagesVm.stopRealtime()
+        }
+    }
 
     LaunchedEffect(sessionState.isLoggedIn, pushEnabled) {
         com.example.notifications.KartNotificationHelper.ensureChannels(context)
-        if (sessionState.isLoggedIn && pushEnabled &&
+        if (sessionState.isLoggedIn && pushEnabled && !askedNotifPermThisSession &&
             android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
             !com.example.notifications.KartNotificationHelper.hasNotificationPermission(context)
         ) {
+            askedNotifPermThisSession = true
             notifPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
     }
@@ -153,18 +170,64 @@ fun KartAppRoot(
         }
     }
 
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val isNavGraphReady = navBackStackEntry != null
+
     // Handle Deep Links (kart-app:// and https://www.kart.cx/...)
-    LaunchedEffect(deepLinkUri) {
-        if (deepLinkUri != null) {
+    LaunchedEffect(
+        deepLinkUri,
+        isNavGraphReady,
+        sessionState.isBanned,
+        sessionState.isMaintenanceMode,
+        sessionState.isAdmin
+    ) {
+        val maintenanceBlocked = sessionState.isMaintenanceMode && !sessionState.isAdmin
+        if (deepLinkUri != null && !sessionState.isBanned && !maintenanceBlocked) {
+            // Wait until NavHost graph is initialized on cold start before navigating
+            if (!isNavGraphReady) return@LaunchedEffect
+            val graphReady = runCatching { navController.graph; true }.getOrDefault(false)
+            if (!graphReady) return@LaunchedEffect
+
             val raw = deepLinkUri.toString()
+            val normalizedPath = normalizeDeepLinkPath(deepLinkUri)
+            val normalizedSegments = normalizedPath.trim('/').split('/').filter { it.isNotBlank() }
+            val authCode = deepLinkUri.getQueryParameter("code")
+            val authState = deepLinkUri.getQueryParameter("state")
             val refreshToken = deepLinkUri.getQueryParameter("refresh_token")
             val authErrorParam = deepLinkUri.getQueryParameter("error")
+            val liveSession = repository.sessionStore.currentSession()
+            val liveUserId = sessionState.session.userId.ifBlank { liveSession.userId }
+            val isLoggedIn = sessionState.isLoggedIn || liveSession.isLoggedIn
+
+            fun navigateAuthRequired(route: String, singleTop: Boolean = false) {
+                if (!isLoggedIn) {
+                    navController.navigate("login") { launchSingleTop = true }
+                } else {
+                    navController.navigate(route) { if (singleTop) launchSingleTop = true }
+                }
+            }
+
             val isTrustedAuthCallback =
                 (deepLinkUri.scheme == "https" && deepLinkUri.host in setOf("www.kart.cx", "kart.cx")) ||
                     (deepLinkUri.scheme == "kart-app" && deepLinkUri.host in setOf("auth-callback", "auth-tokens"))
             when {
+                !authCode.isNullOrBlank() && (normalizedPath.contains("auth-callback") || deepLinkUri.host == "auth-callback") -> {
+                    if (!isTrustedAuthCallback || isLoggedIn) {
+                        sessionViewModel.showMessage("Sign-in link ignored because a session is already active or the link is untrusted.")
+                    } else {
+                        sessionViewModel.handleDeepLinkAuthCode(authCode, authState) {
+                            navController.navigate("home") {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    inclusive = true
+                                    saveState = false
+                                }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
+                }
                 !refreshToken.isNullOrBlank() -> {
-                    if (!isTrustedAuthCallback || sessionState.isLoggedIn) {
+                    if (!isTrustedAuthCallback || isLoggedIn) {
                         sessionViewModel.showMessage("Sign-in link ignored because a session is already active or the link is untrusted.")
                     } else {
                         sessionViewModel.handleDeepLinkRefreshToken(refreshToken) {
@@ -178,7 +241,7 @@ fun KartAppRoot(
                         }
                     }
                 }
-                (raw.contains("auth-tokens") || deepLinkUri.path == "/login") && !authErrorParam.isNullOrBlank() -> {
+                (raw.contains("auth-callback") || raw.contains("auth-tokens") || normalizedPath == "/login") && !authErrorParam.isNullOrBlank() -> {
                     sessionViewModel.showMessage(authErrorParam)
                 }
                 raw.contains("checkout-success") -> {
@@ -188,22 +251,19 @@ fun KartAppRoot(
                     if (!isTrustedPaymentCallback) {
                         sessionViewModel.showMessage("Ignored untrusted payment callback link.")
                     } else {
-                        val orderId = deepLinkUri.getQueryParameter("orderId")
-                        val subId = deepLinkUri.getQueryParameter("subscriptionId")
-                        val promoId = deepLinkUri.getQueryParameter("promotionId")
-                        val payType = deepLinkUri.getQueryParameter("type")
-                        val ref = deepLinkUri.getQueryParameter("reference") ?: deepLinkUri.getQueryParameter("trxref")
+                        val callback = parsePaymentCallback(deepLinkUri)
+                        val ref = callback.reference
                         var verificationFailed = false
                         if (!ref.isNullOrBlank()) {
                             val verifyRes = when {
-                                !subId.isNullOrBlank() || payType == "subscription" ->
-                                    repository.verifySubscriptionReference(ref)
-                                !promoId.isNullOrBlank() || payType == "promotion" ->
-                                    repository.verifyPromotionReference(ref)
-                                payType == "wallet" ->
+                                callback.isSubscription ->
+                                    repository.verifySubscriptionReference(callback.subscriptionId.orEmpty(), ref)
+                                callback.isPromotion ->
+                                    repository.verifyPromotionReference(callback.adId.orEmpty(), ref)
+                                callback.isWallet ->
                                     repository.verifyWalletDeposit(ref)
                                 else ->
-                                    repository.verifyPaystackReference(ref)
+                                    repository.verifyPaystackReference(callback.orderId.orEmpty(), ref)
                             }
                             if (verifyRes is com.example.data.repository.ApiResult.Error) {
                                 verificationFailed = true
@@ -213,54 +273,76 @@ fun KartAppRoot(
                             }
                         }
                         if (!verificationFailed) {
-                            val uid = sessionState.session.userId
-                            if (uid.isNotBlank()) {
-                                walletVm.loadWallet(uid)
-                                ordersVm.loadOrders(uid)
-                                sellerVm.loadSellerHub(uid)
+                            if (liveUserId.isNotBlank()) {
+                                walletVm.loadWallet(liveUserId)
+                                ordersVm.loadOrders(liveUserId)
+                                sellerVm.loadSellerHub(liveUserId)
                             }
                             when {
-                                !orderId.isNullOrBlank() -> navController.navigate("order_detail/$orderId")
-                                !subId.isNullOrBlank() || payType == "subscription" -> navController.navigate("subscriptions")
-                                !promoId.isNullOrBlank() || payType == "promotion" -> navController.navigate("seller_promotions")
-                                payType == "wallet" -> navController.navigate("wallet")
-                                else -> navController.navigate("orders")
+                                !callback.orderId.isNullOrBlank() -> {
+                                    ordersVm.loadOrderDetail(callback.orderId)
+                                    navigateAuthRequired("order_detail/${Uri.encode(callback.orderId)}", singleTop = true)
+                                }
+                                callback.isSubscription -> navigateAuthRequired("subscriptions", singleTop = true)
+                                callback.isPromotion -> navigateAuthRequired("seller_promotions", singleTop = true)
+                                callback.isWallet -> navigateAuthRequired("wallet", singleTop = true)
+                                else -> navigateAuthRequired("orders", singleTop = true)
                             }
                         }
                     }
                 }
-                deepLinkUri.path?.startsWith("/marketplace/") == true -> {
-                    val seg = deepLinkUri.lastPathSegment
+                normalizedPath.startsWith("/marketplace/") -> {
+                    val seg = normalizedSegments.lastOrNull()
                     if (!seg.isNullOrBlank() && seg != "categories") {
-                        navController.navigate("product/$seg")
+                        navController.navigate("product/${Uri.encode(seg)}")
                     }
                 }
-                deepLinkUri.path?.startsWith("/profile/") == true -> {
-                    val seg = deepLinkUri.lastPathSegment
-                    if (!seg.isNullOrBlank()) navController.navigate("public_profile/$seg")
+                normalizedPath.startsWith("/profile/") -> {
+                    val seg = normalizedSegments.lastOrNull()
+                    if (!seg.isNullOrBlank()) navController.navigate("public_profile/${Uri.encode(seg)}")
                 }
-                deepLinkUri.path?.startsWith("/messages/") == true -> {
-                    val seg = deepLinkUri.lastPathSegment
-                    if (!seg.isNullOrBlank()) navController.navigate("chat/$seg")
+                normalizedPath.startsWith("/messages/") -> {
+                    val seg = normalizedSegments.lastOrNull()
+                    if (!seg.isNullOrBlank()) navigateAuthRequired("chat/${Uri.encode(seg)}")
                 }
-                deepLinkUri.path == "/messages" -> {
-                    navController.navigate("messages") { launchSingleTop = true }
+                normalizedPath == "/messages" -> {
+                    navigateAuthRequired("messages", singleTop = true)
                 }
-                deepLinkUri.path == "/notifications" -> {
-                    navController.navigate("notifications") { launchSingleTop = true }
+                normalizedPath == "/notifications" -> {
+                    navigateAuthRequired("notifications", singleTop = true)
                 }
-                deepLinkUri.path?.contains("/orders/") == true -> {
-                    val seg = deepLinkUri.lastPathSegment
-                    if (!seg.isNullOrBlank()) navController.navigate("order_detail/$seg")
+                normalizedPath.contains("/orders/") -> {
+                    val seg = normalizedSegments.lastOrNull()
+                    if (!seg.isNullOrBlank()) {
+                        val isTrustedOrderCallback =
+                            (deepLinkUri.scheme == "https" && deepLinkUri.host in setOf("www.kart.cx", "kart.cx")) ||
+                                deepLinkUri.scheme == "kart-app"
+                        val ref = parsePaymentCallback(deepLinkUri).reference
+                        if (!ref.isNullOrBlank() && isTrustedOrderCallback) {
+                            when (val verifyRes = repository.verifyPaystackReference(seg, ref)) {
+                                is com.example.data.repository.ApiResult.Success -> {
+                                    sessionViewModel.showMessage("Payment verified!")
+                                    if (liveUserId.isNotBlank()) {
+                                        ordersVm.loadOrders(liveUserId)
+                                    }
+                                    ordersVm.loadOrderDetail(seg)
+                                }
+                                is com.example.data.repository.ApiResult.Error -> {
+                                    sessionViewModel.showMessage(verifyRes.message)
+                                }
+                            }
+                        }
+                        navigateAuthRequired("order_detail/${Uri.encode(seg)}", singleTop = true)
+                    }
                 }
-                deepLinkUri.path == "/orders" -> {
-                    navController.navigate("orders") { launchSingleTop = true }
+                normalizedPath == "/orders" -> {
+                    navigateAuthRequired("orders", singleTop = true)
                 }
-                deepLinkUri.path?.contains("/wallet") == true -> {
+                normalizedPath.contains("/wallet") -> {
                     val isTrustedWalletCallback =
                         (deepLinkUri.scheme == "https" && deepLinkUri.host in setOf("www.kart.cx", "kart.cx")) ||
                             deepLinkUri.scheme == "kart-app"
-                    val ref = deepLinkUri.getQueryParameter("reference") ?: deepLinkUri.getQueryParameter("trxref")
+                    val ref = parsePaymentCallback(deepLinkUri).reference
                     if (!ref.isNullOrBlank() && isTrustedWalletCallback) {
                         when (val verifyRes = repository.verifyWalletDeposit(ref)) {
                             is com.example.data.repository.ApiResult.Success -> {
@@ -271,13 +353,13 @@ fun KartAppRoot(
                             }
                         }
                     }
-                    if (sessionState.session.userId.isNotBlank()) {
-                        walletVm.loadWallet(sessionState.session.userId)
+                    if (liveUserId.isNotBlank()) {
+                        walletVm.loadWallet(liveUserId)
                     }
-                    navController.navigate("wallet") { launchSingleTop = true }
+                    navigateAuthRequired("wallet", singleTop = true)
                 }
-                deepLinkUri.path?.contains("/verify") == true -> {
-                    navController.navigate("verify_identity") { launchSingleTop = true }
+                normalizedPath.contains("/verify") -> {
+                    navigateAuthRequired("verify_identity", singleTop = true)
                 }
             }
             onDeepLinkConsumed()
@@ -285,6 +367,12 @@ fun KartAppRoot(
     }
 
     // Banned & Maintenance Guards
+    var showMaintenanceAdminLogin by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(sessionState.isMaintenanceMode, sessionState.isAdmin) {
+        if (!sessionState.isMaintenanceMode || sessionState.isAdmin) {
+            showMaintenanceAdminLogin = false
+        }
+    }
     if (sessionState.isBanned) {
         StatusGuardScreen(
             asset = EmptyStateAsset.AUTH_ERROR,
@@ -296,15 +384,31 @@ fun KartAppRoot(
         return
     }
     if (sessionState.isMaintenanceMode && !sessionState.isAdmin) {
-        StatusGuardScreen(
-            asset = EmptyStateAsset.OFFLINE,
-            title = "Kart is Under Maintenance",
-            subtitle = "We're upgrading campus servers and will be back shortly."
-        )
+        if (showMaintenanceAdminLogin && !sessionState.isLoggedIn) {
+            LoginScreen(
+                sessionViewModel = sessionViewModel,
+                onLoginSuccess = { showMaintenanceAdminLogin = false },
+                onNavigateSignUp = { showMaintenanceAdminLogin = false },
+                onNavigateForgotPassword = { showMaintenanceAdminLogin = false },
+                onBack = { showMaintenanceAdminLogin = false }
+            )
+        } else {
+            StatusGuardScreen(
+                asset = EmptyStateAsset.OFFLINE,
+                title = "Kart is Under Maintenance",
+                subtitle = "We're upgrading campus servers and will be back shortly.",
+                actionLabel = "Check Again",
+                onAction = { sessionViewModel.refreshPlatformFlags() },
+                secondaryActionLabel = if (!sessionState.isLoggedIn) "Admin Sign In" else "Sign Out",
+                onSecondaryAction = {
+                    if (!sessionState.isLoggedIn) showMaintenanceAdminLogin = true
+                    else sessionViewModel.signOut()
+                }
+            )
+        }
         return
     }
 
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route ?: "home"
     val baseRoute = currentRoute.substringBefore("/").substringBefore("?")
 
@@ -411,7 +515,8 @@ fun KartAppRoot(
                             onWishlistToggle = { pid ->
                                 sessionViewModel.toggleWishlist(pid) { navController.navigate("login") }
                             },
-                            onInfoPageClick = { slug -> navController.navigate("info/$slug") }
+                            onInfoPageClick = { slug -> navController.navigate("info/$slug") },
+                            onShowMessage = sessionViewModel::showMessage
                         )
                     }
 
@@ -473,7 +578,10 @@ fun KartAppRoot(
                                         sessionViewModel.toggleWishlist(id) { navController.navigate("login") }
                                     },
                                     onRequireAuth = { navController.navigate("login") },
-                                    onOpenChat = { convId -> navController.navigate("chat/$convId") },
+                                    onOpenChat = { convId, product ->
+                                        messagesVm.stageProductAttachment(convId, product)
+                                        navController.navigate("chat/$convId")
+                                    },
                                     onBuyNow = { id ->
                                         if (sessionState.buyNowEnabled) {
                                             navController.navigate("checkout/$id")
@@ -493,7 +601,7 @@ fun KartAppRoot(
                                     if (!sessionState.isLoggedIn) {
                                         sessionViewModel.showMessage("Please sign in to complete checkout.")
                                         navController.navigate("login") {
-                                            popUpTo("checkout/$pid") { inclusive = true }
+                                            popUpTo("checkout/{id}") { inclusive = true }
                                             launchSingleTop = true
                                         }
                                     }
@@ -512,7 +620,7 @@ fun KartAppRoot(
                                                 ordersVm.loadOrders(uid)
                                             }
                                             navController.navigate("order_detail/$orderId") {
-                                                popUpTo("checkout/$pid") { inclusive = true }
+                                                popUpTo("checkout/{id}") { inclusive = true }
                                             }
                                         },
                                         onShowMessage = sessionViewModel::showMessage
@@ -629,6 +737,9 @@ fun KartAppRoot(
                                     conversationId = cid,
                                     currentUserId = sessionState.session.userId,
                                     viewModel = messagesVm,
+                                    blockedUserIds = sessionState.blockedUserIds,
+                                    onBlockUser = { uid, done -> sessionViewModel.blockUser(uid, onDone = done) },
+                                    onUnblockUser = { uid, done -> sessionViewModel.unblockUser(uid, onDone = done) },
                                     onBack = {
                                         sessionViewModel.refreshUnreadCounts()
                                         navController.popBackStack()
@@ -683,7 +794,10 @@ fun KartAppRoot(
                                 SellerDashboardScreen(
                                     userId = sessionState.session.userId,
                                     viewModel = sellerVm,
+                                    isVerified = sessionState.profile?.isVerified == true,
+                                    verificationStatus = sessionState.profile?.verificationStatus,
                                     onBack = { navController.popBackStack() },
+                                    onVerifyIdentity = { navController.navigate("verify_identity") },
                                     onCreateListing = { navController.navigate("seller_create") },
                                     onMyListings = { navController.navigate("seller_listings") },
                                     onSellerOrders = { navController.navigate("seller_orders") },
@@ -700,8 +814,11 @@ fun KartAppRoot(
                                     editProductId = null,
                                     campuses = campuses,
                                     viewModel = sellerVm,
+                                    isVerified = sessionState.profile?.isVerified == true,
+                                    verificationStatus = sessionState.profile?.verificationStatus,
                                     onBack = { navController.popBackStack() },
                                     onRequireAuth = { navController.navigate("login") },
+                                    onVerifyIdentity = { navController.navigate("verify_identity") },
                                     onViewCreatedListing = { pid ->
                                         navController.navigate("product/$pid") {
                                             popUpTo("seller_create") { inclusive = true }
@@ -721,10 +838,13 @@ fun KartAppRoot(
                                     editProductId = pid,
                                     campuses = campuses,
                                     viewModel = sellerVm,
+                                    isVerified = sessionState.profile?.isVerified == true,
+                                    verificationStatus = sessionState.profile?.verificationStatus,
                                     onBack = { navController.popBackStack() },
                                     onRequireAuth = { navController.navigate("login") },
+                                    onVerifyIdentity = { navController.navigate("verify_identity") },
                                     onViewCreatedListing = { id ->
-                                        navController.navigate("product/$id") { popUpTo("seller_edit/$pid") { inclusive = true } }
+                                        navController.navigate("product/$id") { popUpTo("seller_edit/{id}") { inclusive = true } }
                                     },
                                     onShowMessage = sessionViewModel::showMessage
                                 )
@@ -748,6 +868,9 @@ fun KartAppRoot(
                                 PromoteListingScreen(
                                     productId = pid,
                                     viewModel = sellerVm,
+                                    boostRate = sessionState.promoBoostRate,
+                                    featuredRate = sessionState.promoFeaturedRate,
+                                    campusAdRate = sessionState.promoCampusAdRate,
                                     onBack = { navController.popBackStack() },
                                     onShowMessage = sessionViewModel::showMessage
                                 )
@@ -805,7 +928,8 @@ fun KartAppRoot(
                                         onSignOut = { sessionViewModel.signOut { navigateTopTab("home") } },
                                         onProductClick = { p -> navController.navigate("product/${p.id}") },
                                         onWishlistToggle = { pid -> sessionViewModel.toggleWishlist(pid) { navController.navigate("login") } },
-                                        onOpenUserProfile = { uid -> navController.navigate("public_profile/$uid") }
+                                        onOpenUserProfile = { uid -> navController.navigate("public_profile/$uid") },
+                                        onShowMessage = sessionViewModel::showMessage
                                     )
                                 }
                             }
@@ -817,6 +941,7 @@ fun KartAppRoot(
                                     currentUserId = sessionState.session.userId.ifBlank { null },
                                     viewModel = profileVm,
                                     wishlistIds = sessionState.wishlistIds,
+                                    blockedUserIds = sessionState.blockedUserIds,
                                     isEmbeddedTab = false,
                                     onBack = { navController.popBackStack() },
                                     onRequireAuth = { navController.navigate("login") },
@@ -832,7 +957,10 @@ fun KartAppRoot(
                                     onSignOut = { sessionViewModel.signOut { navigateTopTab("home") } },
                                     onProductClick = { p -> navController.navigate("product/${p.id}") },
                                     onWishlistToggle = { pid -> sessionViewModel.toggleWishlist(pid) { navController.navigate("login") } },
-                                    onOpenUserProfile = { nextUid -> navController.navigate("public_profile/$nextUid") }
+                                    onOpenUserProfile = { nextUid -> navController.navigate("public_profile/$nextUid") },
+                                    onBlockUser = { uid, done -> sessionViewModel.blockUser(uid, onDone = done) },
+                                    onUnblockUser = { uid, done -> sessionViewModel.unblockUser(uid, onDone = done) },
+                                    onShowMessage = sessionViewModel::showMessage
                                 )
                             }
 
@@ -871,6 +999,8 @@ fun KartAppRoot(
                                         sessionViewModel.refreshUnreadCounts()
                                         navController.popBackStack()
                                     },
+                                    onShowMessage = sessionViewModel::showMessage,
+                                    onMarkedAllRead = { sessionViewModel.refreshUnreadCounts() },
                                     onNotificationClick = { notif ->
                                         sessionViewModel.refreshUnreadCounts()
                                         val rawLink = notif.link?.trim().orEmpty()
@@ -885,24 +1015,24 @@ fun KartAppRoot(
                                         when {
                                             (path.startsWith("/marketplace/") || path.startsWith("/product/")) &&
                                                 segments.size >= 2 && segments[1] != "categories" -> {
-                                                navController.navigate("product/${segments[1]}")
+                                                navController.navigate("product/${Uri.encode(segments[1])}")
                                             }
                                             path.contains("/orders/") && segments.lastOrNull()?.isNotBlank() == true -> {
-                                                navController.navigate("order_detail/${segments.last()}")
+                                                navController.navigate("order_detail/${Uri.encode(segments.last())}")
                                             }
                                             path.contains("/seller/orders") -> navController.navigate("seller_orders")
                                             path.endsWith("/orders") -> navController.navigate("orders")
                                             (path.startsWith("/messages/") || path.startsWith("/chat/")) && segments.size >= 2 -> {
-                                                navController.navigate("chat/${segments[1]}")
+                                                navController.navigate("chat/${Uri.encode(segments[1])}")
                                             }
                                             path.startsWith("/messages") -> {
                                                 val convId = parsedUri?.getQueryParameter("conversation")
                                                     ?: parsedUri?.getQueryParameter("id")
-                                                if (!convId.isNullOrBlank()) navController.navigate("chat/$convId")
+                                                if (!convId.isNullOrBlank()) navController.navigate("chat/${Uri.encode(convId)}")
                                                 else navigateTopTab("messages")
                                             }
                                             path.startsWith("/profile/") && segments.size >= 2 -> {
-                                                navController.navigate("public_profile/${segments[1]}")
+                                                navController.navigate("public_profile/${Uri.encode(segments[1])}")
                                             }
                                             path == "/profile" -> navigateTopTab("profile")
                                             path.contains("/wallet") -> navController.navigate("wallet")
@@ -965,6 +1095,9 @@ fun KartAppRoot(
                                     currentUserId = sessionState.session.userId,
                                     viewModel = adminVm,
                                     onBuyNowSettingChanged = sessionViewModel::applyBuyNowEnabled,
+                                    onOpenProduct = { productId -> navController.navigate("product/$productId") },
+                                    onOpenSeller = { sellerId -> navController.navigate("public_profile/$sellerId") },
+                                    onOpenOrder = { orderId -> navController.navigate("order_detail/$orderId") },
                                     onBack = { navController.popBackStack() },
                                     onShowMessage = sessionViewModel::showMessage
                                 )
@@ -1015,6 +1148,69 @@ fun KartAppRoot(
                 }
             }
         }
+
+internal data class PaymentCallbackParams(
+    val orderId: String?,
+    val subscriptionId: String?,
+    val adId: String?,
+    val payType: String?,
+    val reference: String?
+) {
+    val isSubscription: Boolean
+        get() = !subscriptionId.isNullOrBlank() || payType == "subscription"
+    val isPromotion: Boolean
+        get() = !adId.isNullOrBlank() || payType == "promotion"
+    val isWallet: Boolean
+        get() = payType == "wallet" ||
+            reference?.startsWith("wdp_", ignoreCase = true) == true ||
+            reference?.startsWith("wallet_dep_", ignoreCase = true) == true
+}
+
+private val ORDER_REF_REGEX = Regex("^order_(.+)_\\d+(?:_retry)?$", RegexOption.IGNORE_CASE)
+private val SUB_REF_REGEX = Regex("^sub_(.+)_\\d+(?:_retry)?$", RegexOption.IGNORE_CASE)
+private val AD_REF_REGEX = Regex("^ad_(.+)_\\d+(?:_retry)?$", RegexOption.IGNORE_CASE)
+
+internal fun parsePaymentCallback(uri: Uri): PaymentCallbackParams {
+    fun queryParam(vararg names: String): String? {
+        for (name in names) {
+            val value = uri.getQueryParameter(name)?.trim()
+            if (!value.isNullOrBlank()) return value
+        }
+        return null
+    }
+
+    val reference = queryParam("reference", "trxref", "ref")
+    val payType = queryParam("type")?.lowercase()
+    val orderId = queryParam("orderId", "order_id")
+        ?: reference?.let { ORDER_REF_REGEX.matchEntire(it)?.groupValues?.getOrNull(1) }
+    val subscriptionId = queryParam("subscriptionId", "subscription_id")
+        ?: reference?.let { SUB_REF_REGEX.matchEntire(it)?.groupValues?.getOrNull(1) }
+    val adId = queryParam("adId", "promotionId", "ad_id")
+        ?: reference?.let { AD_REF_REGEX.matchEntire(it)?.groupValues?.getOrNull(1) }
+
+    return PaymentCallbackParams(
+        orderId = orderId,
+        subscriptionId = subscriptionId,
+        adId = adId,
+        payType = payType,
+        reference = reference
+    )
+}
+
+internal fun normalizeDeepLinkPath(uri: Uri): String {
+    return if (uri.scheme.equals("kart-app", ignoreCase = true)) {
+        val host = uri.host.orEmpty().trim('/')
+        val rawPath = uri.path.orEmpty().trimStart('/')
+        when {
+            host.isBlank() && rawPath.isBlank() -> "/"
+            host.isBlank() -> "/$rawPath"
+            rawPath.isBlank() -> "/$host"
+            else -> "/$host/$rawPath"
+        }
+    } else {
+        uri.path.orEmpty().ifBlank { "/" }
+    }
+}
 
 @Composable
 private fun KartTabScreenFrame(

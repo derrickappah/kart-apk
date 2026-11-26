@@ -6,7 +6,9 @@ import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 /**
  * Handles incoming Firebase Cloud Messaging (FCM) push notifications when the app is
@@ -21,7 +23,8 @@ class KartFirebaseMessagingService : FirebaseMessagingService() {
         val app = application as? KartApplication ?: return
         serviceScope.launch {
             val session = app.container.sessionStore.currentSession()
-            if (session.isLoggedIn) {
+            val pushAllowed = app.container.sessionStore.isPushEnabled()
+            if (session.isLoggedIn && pushAllowed) {
                 app.container.repository.registerFcmToken(session.userId, token)
             }
         }
@@ -39,31 +42,44 @@ class KartFirebaseMessagingService : FirebaseMessagingService() {
             ?: return
 
         val type = data["type"]?.lowercase().orEmpty()
-        val channelId = if (type == "message" || type == "chat") {
+        val isMessage = type == "message" || type == "chat"
+        val channelId = if (isMessage) {
             KartNotificationHelper.CHANNEL_MESSAGES
         } else {
             KartNotificationHelper.CHANNEL_UPDATES
         }
 
         val deepLink = data["deep_link"] ?: data["link"]
-        val notifId = (data["id"] ?: "${title}_${System.currentTimeMillis()}").hashCode()
-
-        serviceScope.launch {
-            val session = app.container.sessionStore.currentSession()
-            val pushAllowed = app.container.sessionStore.isPushEnabled()
-            if (!session.isLoggedIn || !pushAllowed) return@launch
-
-            val targetUserId = data["user_id"]?.trim()
-            if (!targetUserId.isNullOrBlank() && targetUserId != session.userId) return@launch
-
-            KartNotificationHelper.showNotification(
-                context = applicationContext,
-                notificationId = notifId,
-                channelId = channelId,
-                title = title,
-                body = body,
-                deepLink = deepLink
-            )
+        val rawId = data["id"]?.trim().orEmpty()
+        val notifId = when {
+            isMessage -> 1001
+            rawId.isNotBlank() -> rawId.hashCode()
+            else -> "${title}_${body}".hashCode()
         }
+
+        runCatching {
+            runBlocking {
+                val session = app.container.sessionStore.currentSession()
+                val pushAllowed = app.container.sessionStore.isPushEnabled()
+                if (!session.isLoggedIn || !pushAllowed) return@runBlocking
+
+                val targetUserId = data["user_id"]?.trim()
+                if (!targetUserId.isNullOrBlank() && targetUserId != session.userId) return@runBlocking
+
+                KartNotificationHelper.showNotification(
+                    context = applicationContext,
+                    notificationId = notifId,
+                    channelId = channelId,
+                    title = title,
+                    body = body,
+                    deepLink = deepLink
+                )
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        serviceScope.cancel()
+        super.onDestroy()
     }
 }

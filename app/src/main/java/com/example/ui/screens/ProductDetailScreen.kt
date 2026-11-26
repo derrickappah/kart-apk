@@ -116,7 +116,7 @@ fun ProductDetailScreen(
     onBack: () -> Unit,
     onWishlistToggle: (String) -> Unit,
     onRequireAuth: () -> Unit,
-    onOpenChat: (String) -> Unit,
+    onOpenChat: (String, Product) -> Unit,
     onBuyNow: (String) -> Unit,
     onSellerClick: (String) -> Unit,
     onProductClick: (Product) -> Unit,
@@ -197,6 +197,11 @@ fun ProductDetailScreen(
                 val sellerRating = bundle.seller?.averageRating ?: product.seller?.averageRating ?: 0.0
                 val sellerStreak = bundle.seller?.streakCount ?: product.seller?.streakCount ?: 0
                 val reviewCount = bundle.reviews.size
+                val itemDisplayRating = if (bundle.reviews.isNotEmpty()) {
+                    bundle.reviews.map { it.rating.coerceIn(1, 5) }.average()
+                } else {
+                    sellerRating
+                }
                 val displayTitle = KartFormatters.toSentenceCase(product.title)
 
                 // Compute reviews index dynamically for smooth jump from top rating row
@@ -236,7 +241,7 @@ fun ProductDetailScreen(
                         ProductHeaderSection(
                             product = product,
                             displayTitle = displayTitle,
-                            sellerRating = sellerRating,
+                            sellerRating = itemDisplayRating,
                             reviewCount = reviewCount,
                             onRatingClick = {
                                 scope.launch {
@@ -315,6 +320,7 @@ fun ProductDetailScreen(
                     title = displayTitle,
                     collapseProgress = headerProgress,
                     isWishlisted = isWishlisted,
+                    showReport = !isOwner,
                     onBack = onBack,
                     onShare = {
                         viewModel.trackShare(product.id)
@@ -346,7 +352,9 @@ fun ProductDetailScreen(
                     onChatClick = {
                         if (currentUserId == null) onRequireAuth()
                         else if (!sellerId.isNullOrBlank()) {
-                            viewModel.startChatWithSeller(currentUserId, sellerId, product.id, onOpenChat)
+                            viewModel.startChatWithSeller(currentUserId, sellerId, product.id) { convId ->
+                                onOpenChat(convId, product)
+                            }
                         }
                     },
                     onBuyNowClick = {
@@ -365,16 +373,16 @@ fun ProductDetailScreen(
                     ReviewSubmissionDialog(
                         title = bundle.seller?.resolvedName ?: "Seller",
                         isSubmitting = state.actionLoading,
-                        onDismiss = { showReviewDialog = false },
+                        onDismiss = { if (!state.actionLoading) showReviewDialog = false },
                         onSubmit = { rating, formatted ->
-                            showReviewDialog = false
                             viewModel.submitReview(
                                 productId = product.id,
                                 sellerId = sellerId,
                                 rating = rating,
                                 comment = formatted,
                                 currentUserId = currentUserId,
-                                orderId = bundle.verifiedBuyerOrderId
+                                orderId = bundle.verifiedBuyerOrderId,
+                                onSuccess = { showReviewDialog = false }
                             )
                         }
                     )
@@ -383,10 +391,12 @@ fun ProductDetailScreen(
                 if (showReportDialog) {
                     ReportDialog(
                         targetLabel = "Listing",
-                        onDismiss = { showReportDialog = false },
+                        isSubmitting = state.actionLoading,
+                        onDismiss = { if (!state.actionLoading) showReportDialog = false },
                         onSubmit = { reason, details ->
-                            showReportDialog = false
-                            viewModel.submitReport(product.id, reason, details)
+                            viewModel.submitReport(product.id, reason, details) {
+                                showReportDialog = false
+                            }
                         }
                     )
                 }
@@ -519,6 +529,7 @@ private fun ProductDetailTopBar(
     title: String,
     collapseProgress: Float,
     isWishlisted: Boolean,
+    showReport: Boolean = true,
     onBack: () -> Unit,
     onShare: () -> Unit,
     onWishlistToggle: () -> Unit,
@@ -585,13 +596,15 @@ private fun ProductDetailTopBar(
                     onClick = onWishlistToggle,
                     testTag = "product_wishlist_btn"
                 )
-                HeaderActionButton(
-                    icon = KartLucideIcons.Flag,
-                    contentDescription = "Report listing",
-                    collapseProgress = collapseProgress,
-                    onClick = onReport,
-                    testTag = "product_report_btn"
-                )
+                if (showReport) {
+                    HeaderActionButton(
+                        icon = KartLucideIcons.Flag,
+                        contentDescription = "Report listing",
+                        collapseProgress = collapseProgress,
+                        onClick = onReport,
+                        testTag = "product_report_btn"
+                    )
+                }
             }
         }
 
@@ -1215,8 +1228,10 @@ private fun ProductReviewsSection(
                 color = tokens.textSecondary
             )
         } else {
+            var showAllReviews by remember(reviews.size) { mutableStateOf(false) }
+            val visibleReviews = if (showAllReviews) reviews else reviews.take(5)
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                reviews.take(5).forEach { review ->
+                visibleReviews.forEach { review ->
                     val (commentBody, tags) = KartFormatters.parseReviewComment(review.comment)
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -1286,6 +1301,22 @@ private fun ProductReviewsSection(
                                 )
                             }
                         }
+                    }
+                }
+                if (reviews.size > 5) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { showAllReviews = !showAllReviews }
+                            .padding(vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = if (showAllReviews) "Show fewer reviews" else "Show all ${reviews.size} reviews",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                            color = KartPrimary
+                        )
                     }
                 }
             }
@@ -1434,6 +1465,7 @@ private fun ProductStickyBottomBar(
                 } else {
                     OutlinedButton(
                         onClick = onChatClick,
+                        enabled = !actionLoading,
                         shape = RoundedCornerShape(14.dp),
                         border = BorderStroke(1.dp, tokens.subtleDivider),
                         colors = ButtonDefaults.outlinedButtonColors(

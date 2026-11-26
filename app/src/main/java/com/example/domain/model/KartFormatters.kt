@@ -9,8 +9,8 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
 object KartFormatters {
-    private val priceFormatter = DecimalFormat("#,##0.00")
-    private val wholePriceFormatter = DecimalFormat("#,##0")
+    private val priceFormatter = ThreadLocal.withInitial { DecimalFormat("#,##0.00") }
+    private val wholePriceFormatter = ThreadLocal.withInitial { DecimalFormat("#,##0") }
     private val dynamicCampusAbbreviations = ConcurrentHashMap<String, String>()
     private val campusStopWords = setOf("of", "and", "for", "the", "in", "at", "on", "&", "-")
     private val parenAcronymRegex = Regex("\\(([A-Za-z0-9-]{2,10})\\)")
@@ -185,9 +185,9 @@ object KartFormatters {
     fun formatPrice(price: Double?): String {
         val safe = price ?: 0.0
         return if (safe % 1.0 == 0.0) {
-            wholePriceFormatter.format(safe)
+            wholePriceFormatter.get()!!.format(safe)
         } else {
-            priceFormatter.format(safe)
+            priceFormatter.get()!!.format(safe)
         }
     }
 
@@ -201,10 +201,21 @@ object KartFormatters {
         }
     }
 
+    private val fractionalSecondsRegex = Regex("\\.(\\d+)")
+
     fun parseIsoTimestamp(iso: String?): Long {
         if (iso.isNullOrBlank()) return 0L
+        // Normalize fractional seconds to exactly 3 digits (milliseconds) because SimpleDateFormat
+        // treats `S` as a raw millisecond integer rather than fractional seconds.
+        val normalized = fractionalSecondsRegex.replace(iso.trim()) { match ->
+            val digits = match.groupValues[1]
+            val millis = when {
+                digits.length >= 3 -> digits.substring(0, 3)
+                else -> digits.padEnd(3, '0')
+            }
+            ".$millis"
+        }
         val patterns = listOf(
-            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
@@ -215,7 +226,7 @@ object KartFormatters {
                 val sdf = SimpleDateFormat(pattern, Locale.US).apply {
                     timeZone = TimeZone.getTimeZone("UTC")
                 }
-                val parsed = sdf.parse(iso)
+                val parsed = sdf.parse(normalized)
                 if (parsed != null) return parsed.time
             } catch (_: Exception) {
                 // try next format
@@ -271,7 +282,7 @@ object KartFormatters {
         var state = seed xor 0x5DEECE66DL
         for (i in list.lastIndex downTo 1) {
             state = (state * 6364136223846793005L + 1442695040888963407L)
-            val j = (abs(state) % (i + 1)).toInt()
+            val j = ((state ushr 1) % (i + 1)).toInt()
             val tmp = list[i]
             list[i] = list[j]
             list[j] = tmp
@@ -465,10 +476,105 @@ object KartFormatters {
         return null
     }
 
+    data class ProductMessagePayload(
+        val productId: String,
+        val title: String,
+        val price: Double,
+        val imageUrl: String?,
+        val caption: String
+    )
+
+    fun encodeMessageProduct(product: Product, caption: String = ""): String {
+        val encodedTitle = java.net.URLEncoder.encode(product.title.trim(), "UTF-8")
+        val safeImage = product.primaryImage?.takeIf { isTrustedMediaUrl(it) }.orEmpty()
+        val encodedImage = java.net.URLEncoder.encode(safeImage, "UTF-8")
+        val header = "[PRODUCT:${product.id}|${product.price}|$encodedTitle|$encodedImage]"
+        val trimmedCaption = caption.trim()
+        return if (trimmedCaption.isEmpty()) header else "$header\n$trimmedCaption"
+    }
+
+    fun extractMessageProduct(content: String): ProductMessagePayload? {
+        val trimmed = content.trim()
+        if (!trimmed.startsWith("[PRODUCT:")) return null
+        val closingIdx = trimmed.indexOf(']')
+        if (closingIdx <= "[PRODUCT:".length) return null
+        val inner = trimmed.substring("[PRODUCT:".length, closingIdx)
+        val parts = inner.split("|", limit = 4)
+        if (parts.size < 3) return null
+        val productId = parts[0].trim()
+        val price = parts[1].trim().toDoubleOrNull() ?: return null
+        val title = runCatching { java.net.URLDecoder.decode(parts[2].trim(), "UTF-8") }.getOrDefault(parts[2].trim())
+        val rawImage = parts.getOrNull(3)?.trim().orEmpty()
+        val decodedImage = if (rawImage.isNotEmpty()) {
+            runCatching { java.net.URLDecoder.decode(rawImage, "UTF-8") }.getOrDefault(rawImage)
+        } else ""
+        val safeImage = decodedImage.takeIf { it.isNotBlank() && isTrustedMediaUrl(it) }
+        if (productId.isBlank() || title.isBlank()) return null
+        val caption = trimmed.substring(closingIdx + 1).trim()
+        return ProductMessagePayload(
+            productId = productId,
+            title = title,
+            price = price,
+            imageUrl = safeImage,
+            caption = caption
+        )
+    }
+
+    data class ReplyMessagePayload(
+        val replyToId: String,
+        val senderName: String,
+        val snippet: String,
+        val body: String
+    )
+
+    fun encodeMessageReply(
+        replyToId: String,
+        senderName: String,
+        snippet: String,
+        body: String
+    ): String {
+        val safeId = replyToId.trim().replace("|", "").replace("]", "")
+        val encodedSender = java.net.URLEncoder.encode(senderName.trim().take(60), "UTF-8")
+        val encodedSnippet = java.net.URLEncoder.encode(snippet.trim().replace("\n", " ").take(140), "UTF-8")
+        val header = "[REPLY:$safeId|$encodedSender|$encodedSnippet]"
+        val trimmedBody = body.trim()
+        return if (trimmedBody.isEmpty()) header else "$header\n$trimmedBody"
+    }
+
+    fun extractMessageReply(content: String): ReplyMessagePayload? {
+        val trimmed = content.trim()
+        if (!trimmed.startsWith("[REPLY:")) return null
+        val closingIdx = trimmed.indexOf(']')
+        if (closingIdx <= "[REPLY:".length) return null
+        val inner = trimmed.substring("[REPLY:".length, closingIdx)
+        val parts = inner.split("|", limit = 3)
+        if (parts.size < 3) return null
+        val replyToId = parts[0].trim()
+        val senderName = runCatching { java.net.URLDecoder.decode(parts[1].trim(), "UTF-8") }.getOrDefault(parts[1].trim())
+        val snippet = runCatching { java.net.URLDecoder.decode(parts[2].trim(), "UTF-8") }.getOrDefault(parts[2].trim())
+        val body = trimmed.substring(closingIdx + 1).trim()
+        if (senderName.isBlank() && snippet.isBlank()) return null
+        return ReplyMessagePayload(
+            replyToId = replyToId,
+            senderName = senderName.ifBlank { "Message" },
+            snippet = snippet.ifBlank { "Message" },
+            body = body
+        )
+    }
+
     fun messageSnippet(content: String?): String {
         val raw = content?.trim().orEmpty()
         if (raw.isEmpty()) return "No messages yet"
+        extractMessageReply(raw)?.let { reply ->
+            return messageSnippet(reply.body)
+        }
         if (extractMessageVoice(raw) != null || raw.startsWith("[VOICE:")) return "🎤 Voice message"
-        return if (extractMessageImageUrl(raw) != null || raw.startsWith("[IMAGE:")) "📷 Photo" else raw
+        if (extractMessageImageUrl(raw) != null || raw.startsWith("[IMAGE:")) return "📷 Photo"
+        extractMessageProduct(raw)?.let { payload ->
+            return if (payload.caption.isNotBlank()) "🛍️ ${payload.title}: ${payload.caption}"
+            else "🛍️ ${payload.title}"
+        }
+        if (raw.startsWith("[PRODUCT:")) return "🛍️ Product"
+        return raw
     }
 }

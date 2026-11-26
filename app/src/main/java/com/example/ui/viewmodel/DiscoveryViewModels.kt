@@ -26,13 +26,16 @@ class HomeViewModel(private val repository: KartRepository) : ViewModel() {
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
+    private var loadHomeJob: kotlinx.coroutines.Job? = null
+
     init {
         viewModelScope.launch { repository.fetchCampuses() }
         loadHome()
     }
 
     fun loadHome(isRefresh: Boolean = false) {
-        viewModelScope.launch {
+        loadHomeJob?.cancel()
+        loadHomeJob = viewModelScope.launch {
             _uiState.update {
                 if (isRefresh) it.copy(refreshing = true, error = null)
                 else it.copy(loading = it.feed == null, error = null)
@@ -73,29 +76,63 @@ class MarketplaceViewModel(private val repository: KartRepository) : ViewModel()
     private val _uiState = MutableStateFlow(MarketplaceUiState())
     val uiState: StateFlow<MarketplaceUiState> = _uiState.asStateFlow()
 
+    private var hasInitializedLoad = false
+    private var searchDebounceJob: kotlinx.coroutines.Job? = null
+    private var loadJob: kotlinx.coroutines.Job? = null
+
     init {
         viewModelScope.launch {
             val campuses = repository.fetchCampuses()
             _uiState.update { it.copy(campuses = campuses) }
         }
-        loadProducts(reset = true)
+    }
+
+    fun ensureInitialLoad(initialCategory: String?) {
+        val cat = initialCategory.orEmpty()
+        if (!hasInitializedLoad) {
+            hasInitializedLoad = true
+            if (cat.isNotBlank() && _uiState.value.filter.category != cat) {
+                _uiState.update { it.copy(filter = it.filter.copy(category = cat)) }
+            }
+            loadProducts(reset = true)
+        } else if (cat.isNotBlank() && _uiState.value.filter.category != cat) {
+            setCategory(cat)
+        }
     }
 
     fun applyFilter(newFilter: MarketplaceFilter) {
+        searchDebounceJob?.cancel()
+        hasInitializedLoad = true
         _uiState.update { it.copy(filter = newFilter) }
         loadProducts(reset = true)
     }
 
     fun updateSearch(query: String) {
         _uiState.update { it.copy(filter = it.filter.copy(query = query)) }
+        searchDebounceJob?.cancel()
+        searchDebounceJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(350L)
+            hasInitializedLoad = true
+            loadProducts(reset = true)
+        }
+    }
+
+    fun submitSearchNow() {
+        searchDebounceJob?.cancel()
+        hasInitializedLoad = true
+        loadProducts(reset = true)
     }
 
     fun setCategory(category: String) {
+        searchDebounceJob?.cancel()
+        hasInitializedLoad = true
         _uiState.update { it.copy(filter = it.filter.copy(category = category)) }
         loadProducts(reset = true)
     }
 
     fun resetFilters() {
+        searchDebounceJob?.cancel()
+        hasInitializedLoad = true
         _uiState.update { it.copy(filter = MarketplaceFilter()) }
         loadProducts(reset = true)
     }
@@ -104,15 +141,16 @@ class MarketplaceViewModel(private val repository: KartRepository) : ViewModel()
         val state = _uiState.value
         val nextPage = if (reset) 1 else state.currentPage + 1
         if (!reset && (state.loading || state.loadingMore || state.refreshing || !state.hasMore)) return
+        if (reset) loadJob?.cancel()
 
-        viewModelScope.launch {
-            _uiState.update {
-                when {
-                    isRefresh -> it.copy(refreshing = true, error = null)
-                    reset -> it.copy(loading = true, error = null)
-                    else -> it.copy(loadingMore = true)
-                }
+        _uiState.update {
+            when {
+                isRefresh -> it.copy(refreshing = true, error = null)
+                reset -> it.copy(loading = true, error = null)
+                else -> it.copy(loadingMore = true, error = null)
             }
+        }
+        loadJob = viewModelScope.launch {
             when (val res = repository.fetchMarketplaceProducts(state.filter, page = nextPage, limit = 12)) {
                 is ApiResult.Success -> {
                     _uiState.update { curr ->
@@ -150,8 +188,12 @@ class ProductDetailViewModel(private val repository: KartRepository) : ViewModel
     private val _uiState = MutableStateFlow(ProductDetailUiState())
     val uiState: StateFlow<ProductDetailUiState> = _uiState.asStateFlow()
 
+    private var loadProductJob: kotlinx.coroutines.Job? = null
+    private var followInFlight = false
+
     fun loadProduct(productId: String, currentUserId: String?) {
         val isDifferentProduct = _uiState.value.bundle?.product?.id != productId
+        loadProductJob?.cancel()
         _uiState.update {
             it.copy(
                 loading = true,
@@ -159,7 +201,7 @@ class ProductDetailViewModel(private val repository: KartRepository) : ViewModel
                 error = null
             )
         }
-        viewModelScope.launch {
+        loadProductJob = viewModelScope.launch {
             when (val res = repository.fetchProductDetail(productId, currentUserId)) {
                 is ApiResult.Success -> _uiState.update { it.copy(loading = false, bundle = res.data, error = null) }
                 is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = res.message) }
@@ -168,18 +210,47 @@ class ProductDetailViewModel(private val repository: KartRepository) : ViewModel
     }
 
     fun toggleFollow(sellerId: String) {
+        if (followInFlight) return
         val currentBundle = _uiState.value.bundle ?: return
+        followInFlight = true
         val nextFollow = !currentBundle.isFollowingSeller
         val nextCount = (currentBundle.followerCount + if (nextFollow) 1 else -1).coerceAtLeast(0)
         _uiState.update {
             it.copy(bundle = currentBundle.copy(isFollowingSeller = nextFollow, followerCount = nextCount))
         }
         viewModelScope.launch {
-            when (val res = repository.toggleFollow(sellerId)) {
-                is ApiResult.Error -> {
-                    _uiState.update { it.copy(bundle = currentBundle, feedbackMessage = res.message) }
+            try {
+                when (val res = repository.toggleFollow(sellerId)) {
+                    is ApiResult.Error -> {
+                        _uiState.update { state ->
+                            if (state.bundle?.product?.id == currentBundle.product.id) {
+                                state.copy(bundle = currentBundle, feedbackMessage = res.message)
+                            } else {
+                                state.copy(feedbackMessage = res.message)
+                            }
+                        }
+                    }
+                    is ApiResult.Success -> {
+                        val serverFollowing = res.data
+                        if (serverFollowing != nextFollow) {
+                            val correctedCount = (currentBundle.followerCount +
+                                if (serverFollowing == currentBundle.isFollowingSeller) 0
+                                else if (serverFollowing) 1 else -1).coerceAtLeast(0)
+                            _uiState.update { state ->
+                                if (state.bundle?.product?.id == currentBundle.product.id) {
+                                    state.copy(
+                                        bundle = state.bundle.copy(
+                                            isFollowingSeller = serverFollowing,
+                                            followerCount = correctedCount
+                                        )
+                                    )
+                                } else state
+                            }
+                        }
+                    }
                 }
-                is ApiResult.Success -> Unit
+            } finally {
+                followInFlight = false
             }
         }
     }
@@ -190,7 +261,8 @@ class ProductDetailViewModel(private val repository: KartRepository) : ViewModel
         rating: Int,
         comment: String,
         currentUserId: String?,
-        orderId: String? = null
+        orderId: String? = null,
+        onSuccess: () -> Unit = {}
     ) {
         val currentBundle = _uiState.value.bundle
         val verifiedOrderId = orderId ?: currentBundle?.verifiedBuyerOrderId
@@ -209,6 +281,7 @@ class ProductDetailViewModel(private val repository: KartRepository) : ViewModel
             when (val res = repository.submitReview(productId, sellerId, verifiedOrderId, rating, comment)) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(actionLoading = false, feedbackMessage = "Review published!") }
+                    onSuccess()
                     loadProduct(productId, currentUserId)
                 }
                 is ApiResult.Error -> _uiState.update { it.copy(actionLoading = false, feedbackMessage = res.message) }
@@ -216,11 +289,15 @@ class ProductDetailViewModel(private val repository: KartRepository) : ViewModel
         }
     }
 
-    fun submitReport(productId: String, reason: String, details: String) {
+    fun submitReport(productId: String, reason: String, details: String, onSuccess: () -> Unit = {}) {
         viewModelScope.launch {
+            _uiState.update { it.copy(actionLoading = true) }
             when (val res = repository.submitReport("product", productId, reason, details)) {
-                is ApiResult.Success -> _uiState.update { it.copy(feedbackMessage = "Report submitted to Kart moderation.") }
-                is ApiResult.Error -> _uiState.update { it.copy(feedbackMessage = res.message) }
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(actionLoading = false, feedbackMessage = "Report submitted to Kart moderation.") }
+                    onSuccess()
+                }
+                is ApiResult.Error -> _uiState.update { it.copy(actionLoading = false, feedbackMessage = res.message) }
             }
         }
     }

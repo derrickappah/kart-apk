@@ -31,6 +31,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -102,7 +104,10 @@ import com.example.ui.viewmodel.SellerViewModel
 fun SellerDashboardScreen(
     userId: String,
     viewModel: SellerViewModel,
+    isVerified: Boolean = false,
+    verificationStatus: String? = null,
     onBack: () -> Unit,
+    onVerifyIdentity: () -> Unit = {},
     onCreateListing: () -> Unit,
     onMyListings: () -> Unit,
     onSellerOrders: () -> Unit,
@@ -127,6 +132,17 @@ fun SellerDashboardScreen(
                 ShimmerBox(modifier = Modifier.fillMaxWidth().height(110.dp))
                 ShimmerBox(modifier = Modifier.fillMaxWidth().height(180.dp))
             }
+        } else if (state.error != null && state.hub == null) {
+            EmptyStateView(
+                asset = EmptyStateAsset.ERROR,
+                title = "Could not load Seller Studio",
+                subtitle = state.error ?: "Check your connection and try again.",
+                actionLabel = "Retry",
+                onActionClick = { viewModel.loadSellerHub(userId) },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            )
         } else {
             val hub = state.hub
             LazyColumn(
@@ -134,6 +150,49 @@ fun SellerDashboardScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
+                if (!isVerified) {
+                    val isPending = verificationStatus.equals("Pending", ignoreCase = true)
+                    item {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = KartWarningContainer),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onVerifyIdentity)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.padding(16.dp)
+                            ) {
+                                Icon(
+                                    imageVector = KartLucideIcons.ShieldCheck,
+                                    contentDescription = null,
+                                    tint = KartWarning,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (isPending) "Verification Under Review" else "Verification Required to Sell",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = tokens.textPrimary
+                                    )
+                                    Text(
+                                        text = if (isPending) {
+                                            "You'll be able to post items once your identity is approved."
+                                        } else {
+                                            "Verify your identity before posting items on Kart. Tap to verify."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = tokens.textSecondary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // KPI 2x2 Grid
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -200,6 +259,7 @@ fun SellerEarningsAreaChart(
                 .height(140.dp)
                 .padding(vertical = 8.dp)
         ) {
+            if (values.isEmpty()) return@Canvas
             val count = values.size.coerceAtLeast(2)
             val stepX = size.width / (count - 1).coerceAtLeast(1)
             val points = values.mapIndexed { i, v ->
@@ -257,8 +317,11 @@ fun CreateEditListingScreen(
     editProductId: String? = null,
     campuses: List<String> = KartGhanaCampuses,
     viewModel: SellerViewModel,
+    isVerified: Boolean = false,
+    verificationStatus: String? = null,
     onBack: () -> Unit,
     onRequireAuth: () -> Unit,
+    onVerifyIdentity: () -> Unit = {},
     onViewCreatedListing: (String) -> Unit,
     onShowMessage: (String) -> Unit
 ) {
@@ -275,6 +338,37 @@ fun CreateEditListingScreen(
                 subtitle = "Turn textbooks, gadgets, and dorm items into cash across your campus.",
                 actionLabel = "Sign In",
                 onActionClick = onRequireAuth
+            )
+        }
+        return
+    }
+
+    // Only gate new listing creation on verification (DB RLS gates INSERT; sellers can still edit existing listings)
+    val isCreatingNew = editProductId.isNullOrBlank() && editProduct == null
+    if (!isVerified && isCreatingNew) {
+        val isPending = verificationStatus.equals("Pending", ignoreCase = true)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            KartSubScreenTopBar(
+                title = if (editProductId.isNullOrBlank()) "Sell an Item" else "Edit listing",
+                onBack = onBack
+            )
+            EmptyStateView(
+                asset = if (isPending) EmptyStateAsset.VERIFICATION_PENDING else EmptyStateAsset.VERIFY_IDENTITY,
+                title = if (isPending) "Verification Under Review" else "Verify Your Identity to Sell",
+                subtitle = if (isPending) {
+                    "Your identity verification is currently being reviewed. You'll be able to sell and post items once your account is verified."
+                } else {
+                    "To keep Kart campuses safe, you need to verify your identity before selling or posting items."
+                },
+                actionLabel = if (isPending) "View Verification Status" else "Verify Identity",
+                onActionClick = onVerifyIdentity,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
             )
         }
         return
@@ -348,8 +442,24 @@ fun CreateEditListingScreen(
     var condition by remember(targetEdit) {
         mutableStateOf(conditionOptionFor(targetEdit?.condition)?.name ?: "Like New")
     }
-    var campus by remember(targetEdit, availableCampuses) {
-        mutableStateOf(targetEdit?.campus ?: availableCampuses.first())
+    var campus by remember(targetEdit) {
+        mutableStateOf(targetEdit?.campus.orEmpty())
+    }
+    var showCampusSuggestions by remember { mutableStateOf(false) }
+    val sellListState = rememberLazyListState()
+    val matchingCampuses = remember(campus, availableCampuses) {
+        val q = campus.trim()
+        if (q.isEmpty()) availableCampuses.take(5)
+        else availableCampuses.filter { c ->
+            c.contains(q, ignoreCase = true) ||
+                KartFormatters.abbreviateCampus(c).contains(q, ignoreCase = true)
+        }.take(6)
+    }
+    LaunchedEffect(showCampusSuggestions, campus) {
+        if (showCampusSuggestions) {
+            val lastIdx = (sellListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+            sellListState.animateScrollToItem(lastIdx)
+        }
     }
     var existingUrls by remember(targetEdit) { mutableStateOf(targetEdit?.allImages.orEmpty()) }
     var pickedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
@@ -432,11 +542,13 @@ fun CreateEditListingScreen(
         val minStock = if (targetEdit != null) 0 else 1
         val canPublish = title.trim().length >= 3 &&
             description.trim().length >= 10 &&
+            campus.trim().isNotBlank() &&
             parsedPrice in 0.01..1_000_000.0 &&
             parsedStock >= minStock &&
             totalPhotoCount >= 1
 
         LazyColumn(
+            state = sellListState,
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
             modifier = Modifier
@@ -642,8 +754,11 @@ fun CreateEditListingScreen(
                         )
                         KartTextField(
                             value = stockText,
-                            onValueChange = { stockText = it.filter(Char::isDigit).take(4) },
-                            label = "Quantity",
+                            onValueChange = { raw ->
+                                val digits = raw.filter(Char::isDigit).take(3)
+                                stockText = digits
+                            },
+                            label = "Quantity (max 999)",
                             placeholder = "1",
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.weight(0.9f),
@@ -697,16 +812,120 @@ fun CreateEditListingScreen(
 
             // Campus Section
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "Campus",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = tokens.textPrimary
+                val trimmedQuery = campus.trim()
+                val normalizedCustomCampus = trimmedQuery.uppercase(java.util.Locale.US)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    KartTextField(
+                        value = campus,
+                        onValueChange = {
+                            campus = it
+                            showCampusSuggestions = true
+                        },
+                        label = "Campus",
+                        placeholder = "Search or enter your campus...",
+                        leadingIcon = {
+                            Icon(
+                                imageVector = KartLucideIcons.Search,
+                                contentDescription = null,
+                                tint = tokens.textMuted,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        trailingIcon = if (campus.isNotEmpty()) {
+                            {
+                                IconButton(
+                                    onClick = {
+                                        campus = ""
+                                        showCampusSuggestions = true
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = KartLucideIcons.X,
+                                        contentDescription = "Clear campus",
+                                        tint = tokens.textMuted,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+                        } else null,
+                        modifier = Modifier.onFocusChanged { focusState ->
+                            if (focusState.isFocused) {
+                                showCampusSuggestions = true
+                            }
+                        }
                     )
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(availableCampuses) { c ->
-                            KartChip(label = c, selected = campus == c, onClick = { campus = c })
+                    if (showCampusSuggestions) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(MaterialTheme.colorScheme.surface)
+                                .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
+                        ) {
+                            if (matchingCampuses.isNotEmpty()) {
+                                matchingCampuses.forEachIndexed { idx, match ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                campus = match
+                                                showCampusSuggestions = false
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = KartLucideIcons.MapPin,
+                                            contentDescription = null,
+                                            tint = KartPrimary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Text(
+                                            text = match,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = tokens.textPrimary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    if (idx < matchingCampuses.lastIndex) {
+                                        HorizontalDivider(color = tokens.cardBorder)
+                                    }
+                                }
+                            } else {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            campus = normalizedCustomCampus
+                                            showCampusSuggestions = false
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = KartLucideIcons.Plus,
+                                        contentDescription = null,
+                                        tint = KartPrimary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "No matching campus found",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = tokens.textSecondary
+                                        )
+                                        Text(
+                                            text = "Use \"$normalizedCustomCampus\"",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = KartPrimary
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -740,6 +959,10 @@ fun CreateEditListingScreen(
                     loading = state.actionLoading,
                     enabled = canPublish,
                     onClick = {
+                        val trimmedCampus = campus.trim()
+                        val resolvedCampus = availableCampuses.firstOrNull {
+                            it.equals(trimmedCampus, ignoreCase = true)
+                        } ?: trimmedCampus.uppercase(java.util.Locale.US)
                         viewModel.publishListing(
                             sellerId = sellerId,
                             editProductId = targetEdit?.id,
@@ -748,7 +971,7 @@ fun CreateEditListingScreen(
                             price = parsedPrice,
                             category = category,
                             condition = condition,
-                            campus = campus,
+                            campus = resolvedCampus,
                             stock = parsedStock.coerceAtLeast(minStock),
                             existingUrls = existingUrls,
                             newImageUris = pickedUris,
@@ -788,6 +1011,12 @@ fun CreateEditListingScreen(
         )
     }
 
+    LaunchedEffect(showInAppCamera, totalPhotoCount) {
+        if (showInAppCamera && (6 - totalPhotoCount) <= 0) {
+            showInAppCamera = false
+        }
+    }
+
     if (showInAppCamera) {
         val remainingSlots = (6 - totalPhotoCount).coerceAtLeast(0)
         if (remainingSlots > 0) {
@@ -805,8 +1034,6 @@ fun CreateEditListingScreen(
                     )
                 }
             )
-        } else {
-            showInAppCamera = false
         }
     }
     }
@@ -894,17 +1121,25 @@ fun MyListingsScreen(
                                     )
                                 }
                             }
+                            val canPromoteItem = item.isActiveListing && !item.isOutOfStock
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 KartOutlineButton(
-                                    text = "Promote",
+                                    text = if (canPromoteItem) "Promote" else "Unavailable",
                                     icon = KartLucideIcons.Megaphone,
+                                    enabled = canPromoteItem && !state.actionLoading,
                                     onClick = { onPromoteListing(item.id) },
                                     modifier = Modifier.weight(1f)
                                 )
-                                IconButton(onClick = { onEditListing(item.id) }) {
+                                IconButton(
+                                    enabled = !state.actionLoading,
+                                    onClick = { onEditListing(item.id) }
+                                ) {
                                     Icon(KartLucideIcons.Pencil, contentDescription = "Edit listing", tint = KartPrimary)
                                 }
-                                IconButton(onClick = { pendingDeleteProduct = item }) {
+                                IconButton(
+                                    enabled = !state.actionLoading,
+                                    onClick = { pendingDeleteProduct = item }
+                                ) {
                                     Icon(KartLucideIcons.Trash2, contentDescription = "Delete listing", tint = KartDanger)
                                 }
                             }
@@ -917,7 +1152,7 @@ fun MyListingsScreen(
 
     pendingDeleteProduct?.let { prod ->
         AlertDialog(
-            onDismissRequest = { pendingDeleteProduct = null },
+            onDismissRequest = { if (!state.actionLoading) pendingDeleteProduct = null },
             title = { Text("Delete Listing?", fontWeight = FontWeight.Bold) },
             text = {
                 Text("Are you sure you want to delete \"${prod.title}\"? Listings with active escrow orders or running promotions cannot be deleted.")
@@ -925,15 +1160,21 @@ fun MyListingsScreen(
             confirmButton = {
                 KartPrimaryButton(
                     text = "Delete",
+                    loading = state.actionLoading,
+                    enabled = !state.actionLoading,
                     containerColor = KartDanger,
                     onClick = {
-                        pendingDeleteProduct = null
-                        viewModel.deleteListing(prod.id, sellerId) {}
+                        viewModel.deleteListing(prod.id, sellerId) {
+                            pendingDeleteProduct = null
+                        }
                     }
                 )
             },
             dismissButton = {
-                TextButton(onClick = { pendingDeleteProduct = null }) { Text("Cancel") }
+                TextButton(
+                    enabled = !state.actionLoading,
+                    onClick = { pendingDeleteProduct = null }
+                ) { Text("Cancel") }
             }
         )
     }
@@ -943,6 +1184,9 @@ fun MyListingsScreen(
 fun PromoteListingScreen(
     productId: String,
     viewModel: SellerViewModel,
+    boostRate: Double = 15.0,
+    featuredRate: Double = 35.0,
+    campusAdRate: Double = 65.0,
     onBack: () -> Unit,
     onShowMessage: (String) -> Unit
 ) {
@@ -950,11 +1194,13 @@ fun PromoteListingScreen(
     val context = LocalContext.current
     var adType by remember { mutableStateOf("Featured") }
     var days by remember { mutableIntStateOf(7) }
-    val tiers = listOf(
-        Triple("Boost", "Higher ranking in Marketplace search", 15.0),
-        Triple("Featured", "Featured Slider + Home Spotlight", 35.0),
-        Triple("Campus Ad", "Top Hero Banner across your campus", 65.0)
-    )
+    val tiers = remember(boostRate, featuredRate, campusAdRate) {
+        listOf(
+            Triple("Boost", "Higher ranking in Marketplace search", boostRate.coerceAtLeast(1.0)),
+            Triple("Featured", "Featured Slider + Home Spotlight", featuredRate.coerceAtLeast(1.0)),
+            Triple("Campus Ad", "Top Hero Banner across your campus", campusAdRate.coerceAtLeast(1.0))
+        )
+    }
 
     LaunchedEffect(state.feedback) {
         state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
@@ -1020,7 +1266,11 @@ fun PromoteListingScreen(
                     onClick = {
                         viewModel.promoteListing(productId, adType, days) { url ->
                             if (url.isNotBlank()) {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                }.onFailure {
+                                    onShowMessage("Could not open payment page in browser.")
+                                }
                             } else {
                                 onShowMessage("Promotion campaign launched!")
                                 onBack()
@@ -1051,46 +1301,66 @@ fun PromotionsListScreen(
     ) {
         KartSubScreenTopBar(title = "Promotions", onBack = onBack)
         val promos = state.hub?.promotions.orEmpty()
-        if (promos.isEmpty()) {
-            EmptyStateView(
-                asset = EmptyStateAsset.PROMOTIONS,
-                title = "No active promotions",
-                subtitle = "Boost your listings to reach more buyers on the Kart homepage.",
-                actionLabel = "Choose a Listing to Boost",
-                onActionClick = onMyListings,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            )
-        } else {
-            LazyColumn(
-                contentPadding = PaddingValues(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(promos, key = { it.id }) { ad ->
-                    val (pillBg, pillFg) = when (ad.status?.lowercase()) {
-                        "active" -> KartSuccessContainer to KartSuccess
-                        "pending" -> KartWarningContainer to KartWarning
-                        else -> KartDangerContainer to KartDanger
-                    }
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(16.dp)) {
-                            Row(
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(ad.product?.title ?: ad.adType ?: "Campaign", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                StatusPill(ad.status ?: "Pending", pillBg, pillFg)
+        when {
+            state.loading && state.hub == null -> {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(20.dp)) {
+                    repeat(3) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(84.dp)) }
+                }
+            }
+            state.error != null && state.hub == null -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.ERROR,
+                    title = "Could not load promotions",
+                    subtitle = state.error ?: "Check your connection and try again.",
+                    actionLabel = "Retry",
+                    onActionClick = { viewModel.loadSellerHub(sellerId) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
+            }
+            promos.isEmpty() -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.PROMOTIONS,
+                    title = "No active promotions",
+                    subtitle = "Boost your listings to reach more buyers on the Kart homepage.",
+                    actionLabel = "Choose a Listing to Boost",
+                    onActionClick = onMyListings,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
+            }
+            else -> {
+                LazyColumn(
+                    contentPadding = PaddingValues(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(promos, key = { it.id }) { ad ->
+                        val (pillBg, pillFg) = when (ad.status?.lowercase()) {
+                            "active" -> KartSuccessContainer to KartSuccess
+                            "pending" -> KartWarningContainer to KartWarning
+                            else -> KartDangerContainer to KartDanger
+                        }
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(16.dp)) {
+                                Row(
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(ad.product?.title ?: ad.adType ?: "Campaign", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                    StatusPill(ad.status ?: "Pending", pillBg, pillFg)
+                                }
+                                Text(
+                                    "${ad.adType ?: "Boost"} • ${ad.views ?: 0} impressions • ${ad.clicks ?: 0} clicks",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = KartThemeTokens.colors.textSecondary
+                                )
                             }
-                            Text(
-                                "${ad.adType ?: "Boost"} • ${ad.views ?: 0} impressions • ${ad.clicks ?: 0} clicks",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = KartThemeTokens.colors.textSecondary
-                            )
                         }
                     }
                 }
@@ -1115,30 +1385,52 @@ fun SellerAnalyticsScreen(
             .background(MaterialTheme.colorScheme.background)
     ) {
         KartSubScreenTopBar(title = "Seller Analytics", onBack = onBack)
-        LazyColumn(
-            contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            item {
-                val totalViews = hub?.listings?.sumOf { it.viewsCount ?: 0 } ?: 0
-                val totalShares = hub?.listings?.sumOf { it.sharesCount ?: 0 } ?: 0
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    KpiCard("Total Views", "$totalViews", KartPrimary, Modifier.weight(1f))
-                    KpiCard("Total Shares", "$totalShares", KartSuccess, Modifier.weight(1f))
+        when {
+            state.loading && hub == null -> {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(20.dp)) {
+                    ShimmerBox(modifier = Modifier.fillMaxWidth().height(92.dp))
+                    ShimmerBox(modifier = Modifier.fillMaxWidth().height(190.dp))
                 }
             }
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.fillMaxWidth()
+            state.error != null && hub == null -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.ERROR,
+                    title = "Could not load analytics",
+                    subtitle = state.error ?: "Check your connection and try again.",
+                    actionLabel = "Retry",
+                    onActionClick = { viewModel.loadSellerHub(sellerId) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
+            }
+            else -> {
+                LazyColumn(
+                    contentPadding = PaddingValues(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
-                        Text("Revenue (Last 7 Days)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        SellerEarningsAreaChart(
-                            values = hub?.chartValues ?: List(7) { 0.0 },
-                            labels = hub?.chartLabels ?: listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-                        )
+                    item {
+                        val totalViews = hub?.listings?.sumOf { it.viewsCount ?: 0 } ?: 0
+                        val totalShares = hub?.listings?.sumOf { it.sharesCount ?: 0 } ?: 0
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            KpiCard("Total Views", "$totalViews", KartPrimary, Modifier.weight(1f))
+                            KpiCard("Total Shares", "$totalShares", KartSuccess, Modifier.weight(1f))
+                        }
+                    }
+                    item {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
+                                Text("Revenue (Last 7 Days)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                SellerEarningsAreaChart(
+                                    values = hub?.chartValues ?: List(7) { 0.0 },
+                                    labels = hub?.chartLabels ?: listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+                                )
+                            }
+                        }
                     }
                 }
             }

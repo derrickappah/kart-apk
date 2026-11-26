@@ -45,7 +45,9 @@ class MainActivity : ComponentActivity() {
             applySplashSystemBars(immersive = true)
         }
 
-        pendingDeepLink = intent?.data
+        if (savedInstanceState == null) {
+            pendingDeepLink = extractDeepLink(intent)
+        }
 
         val repository = (application as KartApplication).container.repository
 
@@ -65,7 +67,12 @@ class MainActivity : ComponentActivity() {
                         repository = repository,
                         sessionViewModel = sessionViewModel,
                         deepLinkUri = pendingDeepLink,
-                        onDeepLinkConsumed = { pendingDeepLink = null }
+                        onDeepLinkConsumed = {
+                            pendingDeepLink = null
+                            intent?.data = null
+                            intent?.removeExtra("deep_link")
+                            intent?.removeExtra("link")
+                        }
                     )
 
                     if (showSplash) {
@@ -88,18 +95,27 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        pendingDeepLink = intent.data
+        pendingDeepLink = extractDeepLink(intent)
+    }
+
+    private fun extractDeepLink(intent: Intent?): Uri? {
+        intent?.data?.let { return it }
+        val extraLink = intent?.getStringExtra("deep_link") ?: intent?.getStringExtra("link")
+        if (extraLink.isNullOrBlank()) return null
+        val normalized = if (extraLink.startsWith("http://") || extraLink.startsWith("https://") || extraLink.startsWith("kart-app://")) {
+            extraLink
+        } else {
+            "https://www.kart.cx/${extraLink.trimStart('/')}"
+        }
+        return runCatching { Uri.parse(normalized) }.getOrNull()
     }
 
     private fun applySplashSystemBars(immersive: Boolean) {
         val controller = WindowCompat.getInsetsController(window, window.decorView)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val lp = window.attributes
-            lp.layoutInDisplayCutoutMode = if (immersive) {
+            lp.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            } else {
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
-            }
             window.attributes = lp
         }
         if (immersive) {

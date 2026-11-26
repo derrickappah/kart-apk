@@ -76,17 +76,21 @@ fun CheckoutScreen(
     val scope = rememberCoroutineScope()
     val tokens = KartThemeTokens.colors
 
-    var product by remember { mutableStateOf<Product?>(null) }
-    var walletBalance by remember { mutableStateOf(0.0) }
-    var liveBuyNowEnabled by remember(buyNowEnabled) { mutableStateOf(buyNowEnabled) }
-    var loading by remember { mutableStateOf(true) }
-    var submitting by remember { mutableStateOf(false) }
-    var quantity by remember { mutableIntStateOf(1) }
-    var paymentMethod by remember { mutableStateOf("paystack") }
+    var product by remember(productId) { mutableStateOf<Product?>(null) }
+    var walletBalance by remember(currentUserId) { mutableStateOf(0.0) }
+    var liveBuyNowEnabled by remember(productId) { mutableStateOf(buyNowEnabled) }
+    var flagsResolved by remember(productId) { mutableStateOf(false) }
+    var loading by remember(productId) { mutableStateOf(true) }
+    var submitting by remember(productId) { mutableStateOf(false) }
+    var quantity by remember(productId) { mutableIntStateOf(1) }
+    var paymentMethod by remember(productId) { mutableStateOf("paystack") }
+    var pendingPaystackOrderId by remember(productId) { mutableStateOf<String?>(null) }
+    var pendingPaystackUrl by remember(productId) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(productId, currentUserId) {
         loading = true
         liveBuyNowEnabled = repository.isBuyNowEnabled()
+        flagsResolved = true
         val detailRes = repository.fetchProductDetail(productId, currentUserId)
         if (detailRes is ApiResult.Success) product = detailRes.data.product
         if (!currentUserId.isNullOrBlank()) {
@@ -103,7 +107,8 @@ fun CheckoutScreen(
     ) {
         KartSubScreenTopBar(title = "Secure Checkout", onBack = onBack)
 
-        if (!buyNowEnabled || !liveBuyNowEnabled) {
+        val effectiveBuyNowEnabled = if (flagsResolved) liveBuyNowEnabled else buyNowEnabled
+        if (!effectiveBuyNowEnabled) {
             EmptyStateView(
                 asset = EmptyStateAsset.ORDERS,
                 title = "Buy Now is currently off",
@@ -151,10 +156,12 @@ fun CheckoutScreen(
             val isInactive = !item.isActiveListing
             val hasInvalidPrice = !item.price.isFinite() || item.price <= 0.0
             val isSelfPurchase = item.sellerId == currentUserId || item.seller?.id == currentUserId
-            val maxStock = (item.stockQuantity ?: 1).coerceAtLeast(1)
+            val availableStock = (item.stockQuantity ?: 1).coerceAtLeast(0)
+            val maxStock = availableStock.coerceAtLeast(1)
             val safeQuantity = quantity.coerceIn(1, maxStock)
-            if (safeQuantity != quantity) {
-                quantity = safeQuantity
+            LaunchedEffect(maxStock) {
+                val clamped = quantity.coerceIn(1, maxStock)
+                if (clamped != quantity) quantity = clamped
             }
             val canCheckout = !isOutOfStock && !isInactive && !isSelfPurchase && !hasInvalidPrice
             val subtotal = item.price * safeQuantity
@@ -223,24 +230,28 @@ fun CheckoutScreen(
                     ) {
                         Column {
                             Text("Quantity", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Text("Max $maxStock available", style = MaterialTheme.typography.bodySmall, color = tokens.textSecondary)
+                            Text(
+                                if (isOutOfStock) "Currently out of stock" else "Max $availableStock available",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isOutOfStock) com.example.ui.theme.KartDanger else tokens.textSecondary
+                            )
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(
                                 onClick = { if (quantity > 1) quantity-- },
-                                enabled = quantity > 1 && canCheckout
+                                enabled = quantity > 1 && canCheckout && pendingPaystackUrl == null
                             ) {
                                 Icon(KartLucideIcons.Minus, contentDescription = "Decrease quantity")
                             }
                             Text(
-                                text = "$safeQuantity",
+                                text = if (isOutOfStock) "0" else "$safeQuantity",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 12.dp)
                             )
                             IconButton(
                                 onClick = { if (quantity < maxStock) quantity++ },
-                                enabled = quantity < maxStock && canCheckout
+                                enabled = quantity < maxStock && canCheckout && pendingPaystackUrl == null
                             ) {
                                 Icon(KartLucideIcons.Plus, contentDescription = "Increase quantity")
                             }
@@ -323,12 +334,15 @@ fun CheckoutScreen(
                         .navigationBarsPadding()
                         .padding(16.dp)
                 ) {
+                    val hasPendingPaystack = !pendingPaystackUrl.isNullOrBlank() && paymentMethod == "paystack"
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     KartPrimaryButton(
                         text = when {
                             isSelfPurchase -> "Cannot Buy Your Own Listing"
                             isOutOfStock -> "Out of Stock"
                             isInactive -> "Listing Unavailable"
                             hasInvalidPrice -> "Invalid Listing Price"
+                            hasPendingPaystack -> "Continue to Paystack Payment"
                             paymentMethod == "wallet" && !canPayWallet -> "Insufficient Wallet Balance"
                             paymentMethod == "wallet" -> "Pay with Kart Wallet"
                             else -> "Proceed to Paystack"
@@ -336,6 +350,15 @@ fun CheckoutScreen(
                         loading = submitting,
                         enabled = canCheckout && (paymentMethod == "paystack" || canPayWallet),
                         onClick = {
+                            if (hasPendingPaystack) {
+                                val existingUrl = pendingPaystackUrl!!
+                                runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(existingUrl)))
+                                }.onFailure {
+                                    onShowMessage("Could not open payment page in browser.")
+                                }
+                                return@KartPrimaryButton
+                            }
                             scope.launch {
                                 submitting = true
                                 val stillEnabled = repository.isBuyNowEnabled()
@@ -347,6 +370,11 @@ fun CheckoutScreen(
                                 }
                                 // Re-verify fresh listing price, availability, and wallet balance before payment
                                 val freshDetail = repository.fetchProductDetail(item.id, currentUserId)
+                                if (freshDetail is ApiResult.Error) {
+                                    submitting = false
+                                    onShowMessage(freshDetail.message.ifBlank { "Could not verify listing availability. Please try again." })
+                                    return@launch
+                                }
                                 if (freshDetail is ApiResult.Success) {
                                     val fresh = freshDetail.data.product
                                     product = fresh
@@ -375,12 +403,18 @@ fun CheckoutScreen(
                                         }
                                     }
                                     if (paymentMethod == "wallet") {
-                                        val freshWallet = repository.fetchWallet(currentUserId)
-                                        if (freshWallet is ApiResult.Success) {
-                                            walletBalance = freshWallet.data.balance
-                                            if (freshWallet.data.balance < fresh.price * safeQuantity) {
+                                        when (val freshWallet = repository.fetchWallet(currentUserId)) {
+                                            is ApiResult.Success -> {
+                                                walletBalance = freshWallet.data.balance
+                                                if (freshWallet.data.balance < fresh.price * safeQuantity) {
+                                                    submitting = false
+                                                    onShowMessage("Your wallet balance is insufficient for this order.")
+                                                    return@launch
+                                                }
+                                            }
+                                            is ApiResult.Error -> {
                                                 submitting = false
-                                                onShowMessage("Your wallet balance is insufficient for this order.")
+                                                onShowMessage(freshWallet.message.ifBlank { "Could not verify wallet balance. Please try again." })
                                                 return@launch
                                             }
                                         }
@@ -403,9 +437,16 @@ fun CheckoutScreen(
                                     when (val res = repository.createOrderPaystack(item.id, safeQuantity)) {
                                         is ApiResult.Success -> {
                                             submitting = false
-                                            val (_, authUrl) = res.data
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)))
-                                            onShowMessage("Complete payment in browser to return automatically.")
+                                            val (createdOrderId, authUrl) = res.data
+                                            pendingPaystackOrderId = createdOrderId.ifBlank { null }
+                                            pendingPaystackUrl = authUrl
+                                            runCatching {
+                                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)))
+                                            }.onSuccess {
+                                                onShowMessage("Complete payment in browser to return automatically.")
+                                            }.onFailure {
+                                                onShowMessage("Could not open payment page in browser.")
+                                            }
                                         }
                                         is ApiResult.Error -> {
                                             submitting = false
@@ -418,6 +459,19 @@ fun CheckoutScreen(
                         modifier = Modifier.fillMaxWidth(),
                         testTag = "checkout_confirm_btn"
                     )
+                    if (hasPendingPaystack && !pendingPaystackOrderId.isNullOrBlank()) {
+                        Text(
+                            text = "Already paid? View Order Status",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = KartPrimary,
+                            modifier = Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .clickable { onOrderCreated(pendingPaystackOrderId!!) }
+                                .padding(vertical = 4.dp)
+                        )
+                    }
+                    }
                 }
             }
         }

@@ -24,9 +24,15 @@ class NetworkMonitor(context: Context) {
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+            val caps = connectivityManager?.getNetworkCapabilities(network)
+            val validated = caps != null &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             synchronized(activeNetworks) {
-                activeNetworks.add(network)
-                _isOnline.value = true
+                if (validated) {
+                    activeNetworks.add(network)
+                    _isOnline.value = true
+                }
             }
         }
 
@@ -51,7 +57,8 @@ class NetworkMonitor(context: Context) {
         val cm = connectivityManager ?: return true
         val active = cm.activeNetwork ?: return false
         val caps = cm.getNetworkCapabilities(active) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
     fun start() {
@@ -72,6 +79,9 @@ class NetworkMonitor(context: Context) {
         val cm = connectivityManager ?: return
         runCatching {
             cm.unregisterNetworkCallback(callback)
+        }
+        synchronized(activeNetworks) {
+            activeNetworks.clear()
         }
         registered = false
     }

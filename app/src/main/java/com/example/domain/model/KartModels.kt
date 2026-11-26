@@ -278,6 +278,7 @@ data class Order(
     @Json(name = "payment_reference") val paymentReference: String? = null,
     @Json(name = "delivery_verified") val deliveryVerified: Boolean? = false,
     @Json(name = "created_at") val createdAt: String? = null,
+    @Json(name = "updated_at") val updatedAt: String? = null,
     val product: OrderProduct? = null,
     val seller: SellerSnippet? = null,
     val buyer: SellerSnippet? = null
@@ -405,7 +406,10 @@ data class PlatformSetting(
 
 data class PlatformFlags(
     val isMaintenanceMode: Boolean = false,
-    val buyNowEnabled: Boolean = true
+    val buyNowEnabled: Boolean = true,
+    val promoBoostRate: Double = 15.0,
+    val promoFeaturedRate: Double = 35.0,
+    val promoCampusAdRate: Double = 65.0
 )
 
 @JsonClass(generateAdapter = true)
@@ -427,26 +431,62 @@ data class VerificationRequestRow(
     val id: String,
     @Json(name = "user_id") val userId: String? = null,
     @Json(name = "full_name") val fullName: String? = null,
+    @Json(name = "student_id") val studentId: String? = null,
     @Json(name = "student_id_number") val studentIdNumber: String? = null,
     val campus: String? = null,
     val status: String? = null,
+    @Json(name = "admin_notes") val adminNotes: String? = null,
     @Json(name = "rejection_reason") val rejectionReason: String? = null,
+    @Json(name = "student_id_image") val studentIdImage: String? = null,
     @Json(name = "id_image_url") val idImageUrl: String? = null,
+    @Json(name = "face_image") val faceImage: String? = null,
     @Json(name = "selfie_image_url") val selfieImageUrl: String? = null,
-    @Json(name = "created_at") val createdAt: String? = null
-)
+    @Json(name = "created_at") val createdAt: String? = null,
+    @Json(name = "updated_at") val updatedAt: String? = null
+) {
+    val resolvedStudentId: String?
+        get() = studentId?.takeIf { it.isNotBlank() } ?: studentIdNumber?.takeIf { it.isNotBlank() }
+
+    val resolvedIdImageUrl: String?
+        get() = studentIdImage?.takeIf { it.isNotBlank() } ?: idImageUrl?.takeIf { it.isNotBlank() }
+
+    val resolvedSelfieImageUrl: String?
+        get() = faceImage?.takeIf { it.isNotBlank() } ?: selfieImageUrl?.takeIf { it.isNotBlank() }
+
+    val resolvedNotes: String?
+        get() = adminNotes?.takeIf { it.isNotBlank() } ?: rejectionReason?.takeIf { it.isNotBlank() }
+}
 
 @JsonClass(generateAdapter = true)
 data class ReportRow(
     val id: String,
     @Json(name = "reporter_id") val reporterId: String? = null,
+    @Json(name = "product_id") val productId: String? = null,
+    @Json(name = "reported_user_id") val reportedUserId: String? = null,
     @Json(name = "target_type") val targetType: String? = null,
     @Json(name = "target_id") val targetId: String? = null,
     val reason: String? = null,
+    val description: String? = null,
     val details: String? = null,
     val status: String? = null,
     @Json(name = "created_at") val createdAt: String? = null
-)
+) {
+    val resolvedTargetType: String
+        get() = when {
+            !productId.isNullOrBlank() -> "product"
+            !reportedUserId.isNullOrBlank() -> "user"
+            !targetType.isNullOrBlank() -> targetType
+            else -> "report"
+        }
+
+    val resolvedTargetId: String?
+        get() = productId?.takeIf { it.isNotBlank() }
+            ?: reportedUserId?.takeIf { it.isNotBlank() }
+            ?: targetId?.takeIf { it.isNotBlank() }
+
+    val resolvedDetails: String?
+        get() = description?.takeIf { it.isNotBlank() } ?: details?.takeIf { it.isNotBlank() }
+}
 
 @JsonClass(generateAdapter = true)
 data class WithdrawalRequestRow(
@@ -457,6 +497,17 @@ data class WithdrawalRequestRow(
     @Json(name = "payout_method") val payoutMethod: String? = null,
     @Json(name = "account_details") val accountDetails: String? = null,
     @Json(name = "created_at") val createdAt: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AccountDeletionRequestRow(
+    val id: String,
+    @Json(name = "user_id") val userId: String? = null,
+    val email: String? = null,
+    val reason: String? = null,
+    val status: String? = null,
+    @Json(name = "created_at") val createdAt: String? = null,
+    @Json(name = "updated_at") val updatedAt: String? = null
 )
 
 @JsonClass(generateAdapter = true)

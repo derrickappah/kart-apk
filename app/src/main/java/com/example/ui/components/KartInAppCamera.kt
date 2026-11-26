@@ -347,10 +347,13 @@ fun KartInAppCameraDialog(
         val mainExecutor = ContextCompat.getMainExecutor(context)
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         var boundProvider: ProcessCameraProvider? = null
+        var disposed = false
 
         val bindListener = Runnable {
+            if (disposed) return@Runnable
             runCatching {
                 val provider = cameraProviderFuture.get()
+                if (disposed) return@runCatching
                 boundProvider = provider
                 val preview = Preview.Builder().build().also {
                     it.surfaceProvider = previewView.surfaceProvider
@@ -385,6 +388,7 @@ fun KartInAppCameraDialog(
         cameraProviderFuture.addListener(bindListener, mainExecutor)
 
         onDispose {
+            disposed = true
             runCatching { boundProvider?.unbindAll() }
             imageCapture = null
         }

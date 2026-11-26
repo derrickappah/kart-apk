@@ -7,7 +7,9 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,16 +22,20 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -44,6 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -58,6 +65,8 @@ import coil.compose.AsyncImage
 import com.example.data.repository.ApiResult
 import com.example.data.repository.KartRepository
 import com.example.domain.model.EmptyStateAsset
+import com.example.domain.model.KartFormatters
+import com.example.domain.model.KartGhanaCampuses
 import com.example.domain.model.Profile
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.KartChip
@@ -66,6 +75,7 @@ import com.example.ui.components.KartOutlineButton
 import com.example.ui.components.KartPrimaryButton
 import com.example.ui.components.KartSubScreenTopBar
 import com.example.ui.components.KartTextField
+import com.example.ui.components.ShimmerBox
 import com.example.ui.theme.KartDanger
 import com.example.ui.theme.KartDangerContainer
 import com.example.ui.theme.KartPrimary
@@ -103,7 +113,12 @@ fun SettingsHubScreen(
                     SettingsRow(
                         icon = KartLucideIcons.IdCard,
                         title = "Identity Verification",
-                        subtitle = if (profile?.isVerified == true) "Verified badge active" else "Submit ID & selfie",
+                        subtitle = when {
+                            profile?.isVerified == true -> "Verified badge active"
+                            profile?.verificationStatus.equals("Pending", true) -> "Verification under review"
+                            profile?.verificationStatus.equals("Rejected", true) -> "Not approved • Tap to resubmit"
+                            else -> "Submit ID & selfie"
+                        },
                         onClick = onNavigateVerify
                     )
                     SettingsRow(
@@ -144,7 +159,7 @@ fun SettingsHubScreen(
                     SettingsRow(
                         icon = KartLucideIcons.KeyRound,
                         title = "Delivery PIN",
-                        subtitle = "4-digit PIN to release escrow funds on handoff",
+                        subtitle = "6-digit PIN to release escrow funds on handoff",
                         onClick = { onNavigateSection("delivery-pin") }
                     )
                     SettingsRow(
@@ -158,6 +173,12 @@ fun SettingsHubScreen(
                         title = "Two-Factor & Login Activity",
                         subtitle = "Manage active sessions & security",
                         onClick = { onNavigateSection("security") }
+                    )
+                    SettingsRow(
+                        icon = KartLucideIcons.Ban,
+                        title = "Blocked Users",
+                        subtitle = "View and unblock restricted accounts",
+                        onClick = { onNavigateSection("blocked-users") }
                     )
                 }
             }
@@ -192,7 +213,15 @@ fun SettingsHubScreen(
                         title = "WhatsApp Support",
                         subtitle = "Chat with Kart team (+233 50 050 2158)",
                         onClick = {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/233500502158")))
+                            runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/233500502158")))
+                            }.onFailure {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Could not open WhatsApp or browser.",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
                         }
                     )
                     SettingsRow(
@@ -307,6 +336,7 @@ fun SettingsDetailScreen(
         "delivery-pin" -> "Delivery PIN"
         "password" -> "Change Password"
         "security" -> "Security & Activity"
+        "blocked-users" -> "Blocked Users"
         "theme" -> "Appearance"
         "language" -> "Language & Region"
         "notifications" -> "Notifications"
@@ -323,7 +353,10 @@ fun SettingsDetailScreen(
 
         LazyColumn(
             contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .imePadding()
         ) {
             when (section) {
                 "email" -> item {
@@ -391,10 +424,11 @@ fun SettingsDetailScreen(
                             KartTextField(email, { email = it }, "Campus Email", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
                             KartOutlineButton(
                                 text = "Send Verification Code",
+                                enabled = !loading && email.trim().contains("@"),
                                 onClick = {
                                     scope.launch {
                                         loading = true
-                                        val r = repository.sendEmailVerificationOtp(email)
+                                        val r = repository.sendEmailVerificationOtp(email.trim())
                                         loading = false
                                         onShowMessage(if (r is ApiResult.Success) "Verification OTP sent!" else (r as ApiResult.Error).message)
                                     }
@@ -409,7 +443,7 @@ fun SettingsDetailScreen(
                                 onClick = {
                                     scope.launch {
                                         loading = true
-                                        val r = repository.verifyEmailOtp(email, otp)
+                                        val r = repository.verifyEmailOtp(email.trim(), otp.trim())
                                         loading = false
                                         if (r is ApiResult.Success) {
                                             verifiedNow = true
@@ -503,10 +537,11 @@ fun SettingsDetailScreen(
                             KartTextField(phone, { phone = it }, "Mobile Number", placeholder = "+233540000000", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
                             KartOutlineButton(
                                 text = "Send SMS OTP",
+                                enabled = !loading && phone.trim().count(Char::isDigit) >= 9,
                                 onClick = {
                                     scope.launch {
                                         loading = true
-                                        val r = repository.sendPhoneOtp(phone)
+                                        val r = repository.sendPhoneOtp(phone.trim())
                                         loading = false
                                         onShowMessage(if (r is ApiResult.Success) "SMS OTP sent!" else (r as ApiResult.Error).message)
                                     }
@@ -521,7 +556,7 @@ fun SettingsDetailScreen(
                                 onClick = {
                                     scope.launch {
                                         loading = true
-                                        val r = repository.verifyPhoneOtp(phone, otp)
+                                        val r = repository.verifyPhoneOtp(phone.trim(), otp.trim())
                                         loading = false
                                         if (r is ApiResult.Success) {
                                             verifiedNow = true
@@ -602,29 +637,61 @@ fun SettingsDetailScreen(
                 }
                 "delivery-pin" -> item {
                     var hasExistingPin by remember { mutableStateOf(false) }
+                    var pinStatusLoading by remember { mutableStateOf(true) }
+                    var pinStatusError by remember { mutableStateOf<String?>(null) }
+                    var pinStatusRefreshKey by remember { mutableIntStateOf(0) }
                     var verifyByPassword by remember { mutableStateOf(false) }
                     var currentPin by remember { mutableStateOf("") }
                     var currentPassword by remember { mutableStateOf("") }
                     var pin by remember { mutableStateOf("") }
                     var confirmPin by remember { mutableStateOf("") }
 
-                    LaunchedEffect(Unit) {
+                    LaunchedEffect(pinStatusRefreshKey) {
+                        pinStatusLoading = true
+                        pinStatusError = null
                         when (val res = repository.fetchDeliveryPinStatus()) {
-                            is ApiResult.Success -> hasExistingPin = res.data
-                            is ApiResult.Error -> Unit
+                            is ApiResult.Success -> {
+                                hasExistingPin = res.data
+                                pinStatusLoading = false
+                            }
+                            is ApiResult.Error -> {
+                                pinStatusError = res.message
+                                pinStatusLoading = false
+                            }
                         }
                     }
 
                     val hasValidReauth = !hasExistingPin ||
-                        (!verifyByPassword && currentPin.length == 4) ||
+                        (!verifyByPassword && currentPin.length == 6) ||
                         (verifyByPassword && currentPassword.length >= 6)
 
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
-                            "Your 4-digit Delivery PIN protects your escrow purchases. Enter it only when you have received and inspected your item.",
+                            "Your 6-digit Delivery PIN protects your escrow purchases. Enter it only when you have received and inspected your item.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = KartThemeTokens.colors.textSecondary
                         )
+                        if (pinStatusLoading) {
+                            ShimmerBox(modifier = Modifier.fillMaxWidth().height(52.dp))
+                        } else if (pinStatusError != null) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = KartDangerContainer),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(14.dp)) {
+                                    Text(
+                                        text = pinStatusError ?: "Could not check Delivery PIN status.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartDanger
+                                    )
+                                    KartOutlineButton(
+                                        text = "Retry",
+                                        onClick = { pinStatusRefreshKey++ }
+                                    )
+                                }
+                            }
+                        } else {
                         if (hasExistingPin) {
                             Text(
                                 "Verify your identity to change your existing Delivery PIN:",
@@ -646,8 +713,8 @@ fun SettingsDetailScreen(
                             if (!verifyByPassword) {
                                 KartTextField(
                                     currentPin,
-                                    { currentPin = it.filter(Char::isDigit).take(4) },
-                                    "Current 4-Digit Delivery PIN",
+                                    { currentPin = it.filter(Char::isDigit).take(6) },
+                                    "Current 6-Digit Delivery PIN",
                                     visualTransformation = PasswordVisualTransformation(),
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
                                 )
@@ -663,22 +730,29 @@ fun SettingsDetailScreen(
                         }
                         KartTextField(
                             pin,
-                            { pin = it.filter(Char::isDigit).take(4) },
-                            "New 4-Digit Delivery PIN",
+                            { pin = it.filter(Char::isDigit).take(6) },
+                            "New 6-Digit Delivery PIN",
                             visualTransformation = PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
                         )
                         KartTextField(
                             confirmPin,
-                            { confirmPin = it.filter(Char::isDigit).take(4) },
-                            "Confirm PIN",
+                            { confirmPin = it.filter(Char::isDigit).take(6) },
+                            "Confirm 6-Digit PIN",
                             visualTransformation = PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
                         )
+                        if (confirmPin.isNotEmpty() && pin != confirmPin) {
+                            Text(
+                                text = "PINs do not match.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = KartDanger
+                            )
+                        }
                         KartPrimaryButton(
                             text = if (hasExistingPin) "Update Delivery PIN" else "Save Delivery PIN",
                             loading = loading,
-                            enabled = pin.length == 4 && pin == confirmPin && hasValidReauth,
+                            enabled = pin.length == 6 && pin == confirmPin && hasValidReauth && !loading,
                             onClick = {
                                 scope.launch {
                                     loading = true
@@ -702,24 +776,42 @@ fun SettingsDetailScreen(
                             },
                             modifier = Modifier.fillMaxWidth()
                         )
+                        }
                     }
                 }
                 "password" -> item {
                     var currentPw by remember { mutableStateOf("") }
                     var newPw by remember { mutableStateOf("") }
+                    var confirmNewPw by remember { mutableStateOf("") }
+                    val passwordsMatch = newPw == confirmNewPw
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         KartTextField(currentPw, { currentPw = it }, "Current Password", visualTransformation = PasswordVisualTransformation())
                         KartTextField(newPw, { newPw = it }, "New Password (min 6 chars)", visualTransformation = PasswordVisualTransformation())
+                        KartTextField(confirmNewPw, { confirmNewPw = it }, "Confirm New Password", visualTransformation = PasswordVisualTransformation())
+                        if (confirmNewPw.isNotEmpty() && !passwordsMatch) {
+                            Text(
+                                text = "New passwords do not match.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = KartDanger
+                            )
+                        }
                         KartPrimaryButton(
                             text = "Update Password",
                             loading = loading,
-                            enabled = currentPw.length >= 6 && newPw.length >= 6,
+                            enabled = currentPw.length >= 6 && newPw.length >= 6 && passwordsMatch && !loading,
                             onClick = {
                                 scope.launch {
                                     loading = true
                                     val r = repository.updatePassword(currentPw, newPw)
                                     loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "Password changed!" else (r as ApiResult.Error).message)
+                                    if (r is ApiResult.Success) {
+                                        currentPw = ""
+                                        newPw = ""
+                                        confirmNewPw = ""
+                                        onShowMessage("Password changed!")
+                                    } else {
+                                        onShowMessage((r as ApiResult.Error).message)
+                                    }
                                 }
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -742,6 +834,90 @@ fun SettingsDetailScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = KartThemeTokens.colors.textSecondary
                                 )
+                            }
+                        }
+                    }
+                }
+                "blocked-users" -> item {
+                    var blockedLoading by remember { mutableStateOf(true) }
+                    var blockedError by remember { mutableStateOf<String?>(null) }
+                    var blockedUsers by remember { mutableStateOf<List<Profile>>(emptyList()) }
+                    var unblockingId by remember { mutableStateOf<String?>(null) }
+                    var reloadTick by remember { mutableIntStateOf(0) }
+
+                    LaunchedEffect(reloadTick) {
+                        blockedLoading = true
+                        blockedError = null
+                        when (val res = repository.fetchBlockedUsers()) {
+                            is ApiResult.Success -> {
+                                blockedUsers = res.data.second
+                                blockedLoading = false
+                            }
+                            is ApiResult.Error -> {
+                                blockedError = res.message
+                                blockedLoading = false
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        when {
+                            blockedLoading -> {
+                                repeat(3) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(64.dp)) }
+                            }
+                            blockedError != null -> {
+                                EmptyStateView(
+                                    asset = EmptyStateAsset.ERROR,
+                                    title = "Could not load blocked users",
+                                    subtitle = blockedError ?: "Please try again.",
+                                    actionLabel = "Retry",
+                                    onActionClick = { reloadTick++ }
+                                )
+                            }
+                            blockedUsers.isEmpty() -> {
+                                EmptyStateView(
+                                    asset = EmptyStateAsset.VERIFICATION,
+                                    title = "No blocked users",
+                                    subtitle = "Users you block from chat or profiles will appear here."
+                                )
+                            }
+                            else -> {
+                                blockedUsers.forEach { user ->
+                                    Card(
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.fillMaxWidth().padding(12.dp)
+                                        ) {
+                                            com.example.ui.components.UserAvatar(
+                                                avatarUrl = user.avatarUrl,
+                                                displayName = user.resolvedName,
+                                                size = 44.dp
+                                            )
+                                            Spacer(Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(user.resolvedName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                                if (!user.campus.isNullOrBlank()) {
+                                                    Text(user.campus, style = MaterialTheme.typography.bodySmall, color = KartThemeTokens.colors.textSecondary)
+                                                }
+                                            }
+                                            KartOutlineButton(
+                                                text = if (unblockingId == user.id) "..." else "Unblock",
+                                                enabled = unblockingId == null,
+                                                onClick = {
+                                                    unblockingId = user.id
+                                                    sessionViewModel.unblockUser(user.id) {
+                                                        blockedUsers = blockedUsers.filterNot { it.id == user.id }
+                                                        unblockingId = null
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -772,55 +948,124 @@ fun SettingsDetailScreen(
                     }
                 }
                 "notifications" -> item {
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    val hasSystemPermission = com.example.notifications.KartNotificationHelper.hasNotificationPermission(context)
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    val next = !pushEnabled
+                                    sessionViewModel.setPushEnabled(next)
+                                    onShowMessage(if (next) "Push alerts enabled" else "Push alerts paused")
+                                }
+                                .padding(vertical = 6.dp)
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                                 Text("Push Alerts", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                                 Text("Chats, escrow updates, and order statuses", style = MaterialTheme.typography.bodySmall, color = KartThemeTokens.colors.textSecondary)
                             }
-                            Switch(checked = pushEnabled, onCheckedChange = { sessionViewModel.setNotificationPrefs(it, emailNotifs) })
+                            Switch(
+                                checked = pushEnabled,
+                                onCheckedChange = { next ->
+                                    sessionViewModel.setPushEnabled(next)
+                                    onShowMessage(if (next) "Push alerts enabled" else "Push alerts paused")
+                                }
+                            )
+                        }
+                        if (pushEnabled && !hasSystemPermission) {
+                            KartOutlineButton(
+                                text = "Allow Notifications in Android Settings",
+                                onClick = {
+                                    val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                    }
+                                    runCatching { context.startActivity(intent) }
+                                }
+                            )
                         }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    val next = !emailNotifs
+                                    sessionViewModel.setEmailNotifsEnabled(next)
+                                    onShowMessage(if (next) "Email updates enabled" else "Email updates paused")
+                                }
+                                .padding(vertical = 6.dp)
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                                 Text("Email Updates", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                                 Text("Receipts, payouts, and campus deals", style = MaterialTheme.typography.bodySmall, color = KartThemeTokens.colors.textSecondary)
                             }
-                            Switch(checked = emailNotifs, onCheckedChange = { sessionViewModel.setNotificationPrefs(pushEnabled, it) })
+                            Switch(
+                                checked = emailNotifs,
+                                onCheckedChange = { next ->
+                                    sessionViewModel.setEmailNotifsEnabled(next)
+                                    onShowMessage(if (next) "Email updates enabled" else "Email updates paused")
+                                }
+                            )
                         }
                     }
                 }
                 "delete-account" -> item {
                     var reason by remember { mutableStateOf("") }
+                    var deletionSubmitted by remember { mutableStateOf(false) }
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         Text(
                             "Submitting a deletion request notifies Kart administrators to permanently erase your profile, listings, and personal records after any pending escrow orders settle.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = KartThemeTokens.colors.textSecondary
                         )
-                        KartTextField(reason, { reason = it }, "Reason for leaving", singleLine = false, maxLines = 4)
-                        KartPrimaryButton(
-                            text = "Submit Deletion Request",
-                            containerColor = KartDanger,
-                            loading = loading,
-                            enabled = reason.trim().length >= 5,
-                            onClick = {
-                                scope.launch {
-                                    loading = true
-                                    val r = repository.requestAccountDeletion(reason.trim())
-                                    loading = false
-                                    onShowMessage(if (r is ApiResult.Success) "Account deletion request submitted." else (r as ApiResult.Error).message)
+                        if (deletionSubmitted) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(14.dp)
+                                ) {
+                                    Icon(KartLucideIcons.CheckCircle, contentDescription = null, tint = KartSuccess)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = "Your account deletion request has been submitted and is pending administrator review.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartThemeTokens.colors.textPrimary
+                                    )
                                 }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                            }
+                        } else {
+                            KartTextField(reason, { reason = it }, "Reason for leaving", singleLine = false, maxLines = 4)
+                            KartPrimaryButton(
+                                text = "Submit Deletion Request",
+                                containerColor = KartDanger,
+                                loading = loading,
+                                enabled = reason.trim().length >= 5 && !loading,
+                                onClick = {
+                                    scope.launch {
+                                        loading = true
+                                        val r = repository.requestAccountDeletion(reason.trim())
+                                        loading = false
+                                        if (r is ApiResult.Success) {
+                                            reason = ""
+                                            deletionSubmitted = true
+                                            onShowMessage("Account deletion request submitted.")
+                                        } else {
+                                            onShowMessage((r as ApiResult.Error).message)
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     }
                 }
             }
@@ -828,20 +1073,39 @@ fun SettingsDetailScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun IdentityVerificationScreen(
     profile: Profile?,
     sessionViewModel: SessionViewModel,
     repository: KartRepository,
+    campuses: List<String> = KartGhanaCampuses,
     onBack: () -> Unit,
     onShowMessage: (String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val tokens = KartThemeTokens.colors
+    val availableCampuses = campuses.ifEmpty { KartGhanaCampuses }
 
     var step by remember { mutableIntStateOf(0) }
     var studentIdNum by remember { mutableStateOf("") }
+    var campusInput by remember(profile?.campus) { mutableStateOf(profile?.campus.orEmpty()) }
+    var showCampusSuggestions by remember { mutableStateOf(false) }
+    val campusBringIntoViewRequester = remember { BringIntoViewRequester() }
+    val matchingCampuses = remember(campusInput, availableCampuses) {
+        val q = campusInput.trim()
+        if (q.isEmpty()) availableCampuses.take(5)
+        else availableCampuses.filter { c ->
+            c.contains(q, ignoreCase = true) ||
+                KartFormatters.abbreviateCampus(c).contains(q, ignoreCase = true)
+        }.take(6)
+    }
+    LaunchedEffect(showCampusSuggestions, matchingCampuses.size) {
+        if (showCampusSuggestions) {
+            campusBringIntoViewRequester.bringIntoView()
+        }
+    }
     var idPhotoUri by remember { mutableStateOf<Uri?>(null) }
     var selfieUri by remember { mutableStateOf<Uri?>(null) }
     var submitting by remember { mutableStateOf(false) }
@@ -850,6 +1114,7 @@ fun IdentityVerificationScreen(
     }
 
     var activeCameraTarget by remember { mutableStateOf<String?>(null) }
+    var pendingCameraTarget by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         sessionViewModel.refreshUserMetadata()
@@ -861,15 +1126,38 @@ fun IdentityVerificationScreen(
     val selfiePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) selfieUri = uri
     }
-
-    fun requestCamera(target: String) {
-        activeCameraTarget = target
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val target = pendingCameraTarget
+        pendingCameraTarget = null
+        if (granted && target != null) {
+            activeCameraTarget = target
+        } else if (!granted) {
+            onShowMessage("Camera permission is required to take a photo.")
+        }
     }
 
-    val step1Complete = studentIdNum.trim().length >= 4 && idPhotoUri != null
+    fun requestCamera(target: String) {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            activeCameraTarget = target
+        } else {
+            pendingCameraTarget = target
+            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+        }
+    }
+
+    val step1Complete = studentIdNum.trim().length >= 4 && campusInput.trim().isNotBlank() && idPhotoUri != null
     val step2Complete = step1Complete && selfieUri != null
     val isRejected = profile?.verificationStatus.equals("Rejected", true)
 
+    val isPending = submitted || profile?.verificationStatus.equals("Pending", true)
+
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -891,7 +1179,7 @@ fun IdentityVerificationScreen(
             return
         }
 
-        if (submitted) {
+        if (isPending) {
             EmptyStateView(
                 asset = EmptyStateAsset.VERIFICATION_PENDING,
                 title = "Verification Under Review",
@@ -907,7 +1195,10 @@ fun IdentityVerificationScreen(
 
         LazyColumn(
             contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .imePadding()
         ) {
             if (isRejected) {
                 item {
@@ -958,6 +1249,126 @@ fun IdentityVerificationScreen(
                         Text("Step 1: Upload ID", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                         Text("Take or select a clear photo of your valid government or institutional ID card.", style = MaterialTheme.typography.bodyMedium, color = tokens.textSecondary)
                         KartTextField(studentIdNum, { studentIdNum = it }, "ID Number (min 4 chars)", placeholder = "e.g. GHA-10948271-0")
+                        val trimmedQuery = campusInput.trim()
+                        val normalizedCustomCampus = trimmedQuery.uppercase(java.util.Locale.US)
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.bringIntoViewRequester(campusBringIntoViewRequester)
+                        ) {
+                            KartTextField(
+                                value = campusInput,
+                                onValueChange = {
+                                    campusInput = it
+                                    showCampusSuggestions = true
+                                },
+                                label = "Campus",
+                                placeholder = "Search or enter your campus...",
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = KartLucideIcons.Search,
+                                        contentDescription = null,
+                                        tint = tokens.textMuted,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                trailingIcon = if (campusInput.isNotEmpty()) {
+                                    {
+                                        IconButton(
+                                            onClick = {
+                                                campusInput = ""
+                                                showCampusSuggestions = true
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = KartLucideIcons.X,
+                                                contentDescription = "Clear campus",
+                                                tint = tokens.textMuted,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
+                                    }
+                                } else null,
+                                modifier = Modifier.onFocusChanged { focusState ->
+                                    if (focusState.isFocused) {
+                                        showCampusSuggestions = true
+                                    }
+                                }
+                            )
+                            if (showCampusSuggestions) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
+                                ) {
+                                    if (matchingCampuses.isNotEmpty()) {
+                                        matchingCampuses.forEachIndexed { idx, match ->
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        campusInput = match
+                                                        showCampusSuggestions = false
+                                                    }
+                                                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = KartLucideIcons.MapPin,
+                                                    contentDescription = null,
+                                                    tint = KartPrimary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(Modifier.width(10.dp))
+                                                Text(
+                                                    text = match,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = tokens.textPrimary,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                            }
+                                            if (idx < matchingCampuses.lastIndex) {
+                                                HorizontalDivider(color = tokens.cardBorder)
+                                            }
+                                        }
+                                    } else {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    campusInput = normalizedCustomCampus
+                                                    showCampusSuggestions = false
+                                                }
+                                                .padding(horizontal = 14.dp, vertical = 12.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = KartLucideIcons.Plus,
+                                                contentDescription = null,
+                                                tint = KartPrimary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "No matching campus found",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = tokens.textSecondary
+                                                )
+                                                Text(
+                                                    text = "Use \"$normalizedCustomCampus\"",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = KartPrimary
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if (idPhotoUri != null) {
                             AsyncImage(
                                 model = idPhotoUri,
@@ -1116,12 +1527,16 @@ fun IdentityVerificationScreen(
                                         ApiResult.Error((idUp as ApiResult.Error).message)
                                     }
                                     if (idUp is ApiResult.Success && selfieUp is ApiResult.Success) {
+                                        val trimmedCampus = campusInput.trim()
+                                        val resolvedCampus = availableCampuses.firstOrNull {
+                                            it.equals(trimmedCampus, ignoreCase = true)
+                                        } ?: trimmedCampus.uppercase(java.util.Locale.US)
                                         when (val res = repository.submitKycVerification(
                                             idImageUrl = idUp.data,
                                             selfieImageUrl = selfieUp.data,
                                             studentIdNumber = studentIdNum.trim(),
                                             fullName = profile?.resolvedName.orEmpty(),
-                                            campus = profile?.campus.orEmpty()
+                                            campus = resolvedCampus
                                         )) {
                                             is ApiResult.Success -> {
                                                 submitting = false
@@ -1173,5 +1588,6 @@ fun IdentityVerificationScreen(
                 }
             }
         )
+    }
     }
 }

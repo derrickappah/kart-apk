@@ -197,6 +197,19 @@ fun WalletScreen(
 
             if (state.loading) {
                 items(3) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(68.dp)) }
+            } else if (state.error != null && state.wallet.transactions.isNullOrEmpty()) {
+                item {
+                    EmptyStateView(
+                        asset = EmptyStateAsset.ERROR,
+                        title = "Could not load wallet",
+                        subtitle = state.error ?: "Check your connection and try again.",
+                        actionLabel = "Retry",
+                        onActionClick = { viewModel.loadWallet(userId) },
+                        modifier = Modifier
+                            .fillParentMaxHeight(0.55f)
+                            .fillMaxWidth()
+                    )
+                }
             } else {
                 val txns = state.wallet.transactions.orEmpty().sortedByDescending { it.createdAt }
                 if (txns.isEmpty()) {
@@ -328,8 +341,13 @@ fun DepositFundsScreen(
                 onClick = {
                     val amt = amountText.toDoubleOrNull() ?: return@KartPrimaryButton
                     viewModel.initiateDeposit(amt) { authUrl ->
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)))
-                        onShowMessage("Complete payment in browser to credit your wallet.")
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)))
+                        }.onSuccess {
+                            onShowMessage("Complete payment in browser to credit your wallet.")
+                        }.onFailure {
+                            onShowMessage("Could not open payment page in browser.")
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -357,12 +375,18 @@ fun WithdrawFundsScreen(
             else "MTN Mobile Money"
         }
     }
-    val defaultDetails = remember(profile) {
-        when {
-            !profile?.momoNumber.isNullOrBlank() -> listOfNotNull(profile?.momoNumber, profile?.resolvedName).joinToString(" - ")
-            !profile?.bankAccountNumber.isNullOrBlank() -> listOfNotNull(profile?.bankName, profile?.bankAccountNumber, profile?.resolvedName).joinToString(" - ")
-            else -> ""
-        }
+    val savedMomoDetails = remember(profile) {
+        if (!profile?.momoNumber.isNullOrBlank()) {
+            listOfNotNull(profile?.momoNumber, profile?.resolvedName).joinToString(" - ")
+        } else ""
+    }
+    val savedBankDetails = remember(profile) {
+        if (!profile?.bankAccountNumber.isNullOrBlank()) {
+            listOfNotNull(profile?.bankName, profile?.bankAccountNumber, profile?.resolvedName).joinToString(" - ")
+        } else ""
+    }
+    val defaultDetails = remember(defaultMethod, savedMomoDetails, savedBankDetails) {
+        if (defaultMethod == "Bank Transfer") savedBankDetails else savedMomoDetails
     }
     var amountText by remember { mutableStateOf("") }
     var method by remember(defaultMethod) { mutableStateOf(defaultMethod) }
@@ -398,7 +422,20 @@ fun WithdrawFundsScreen(
                 color = KartThemeTokens.colors.textSecondary
             )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                methods.forEach { m -> KartChip(label = m, selected = method == m, onClick = { method = m }) }
+                methods.forEach { m ->
+                    KartChip(
+                        label = m,
+                        selected = method == m,
+                        onClick = {
+                            val wasBank = method == "Bank Transfer"
+                            val isBank = m == "Bank Transfer"
+                            method = m
+                            if (wasBank != isBank) {
+                                accountDetails = if (isBank) savedBankDetails else savedMomoDetails
+                            }
+                        }
+                    )
+                }
             }
             KartTextField(
                 value = amountText,
@@ -491,6 +528,19 @@ fun SubscriptionsScreen(
 
             if (state.loading) {
                 items(2) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(150.dp)) }
+            } else if (state.error != null && state.plans.isEmpty()) {
+                item {
+                    EmptyStateView(
+                        asset = EmptyStateAsset.ERROR,
+                        title = "Could not load plans",
+                        subtitle = state.error ?: "Check your connection and try again.",
+                        actionLabel = "Retry",
+                        onActionClick = { viewModel.loadSubscriptions(userId) },
+                        modifier = Modifier
+                            .fillParentMaxHeight(0.65f)
+                            .fillMaxWidth()
+                    )
+                }
             } else {
                 items(state.plans, key = { it.id }) { plan ->
                     val isCurrentActivePlan = activeSub?.planId == plan.id
@@ -529,12 +579,16 @@ fun SubscriptionsScreen(
                                     plan.price <= 0 -> "Activate Plan"
                                     else -> "Subscribe Now"
                                 },
-                                loading = state.actionLoading,
-                                enabled = !isCurrentActivePlan,
+                                loading = state.subscribingPlanId == plan.id,
+                                enabled = !isCurrentActivePlan && !state.actionLoading,
                                 onClick = {
                                     viewModel.subscribe(plan.id) { url ->
                                         if (url.isNotBlank()) {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                            runCatching {
+                                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                            }.onFailure {
+                                                onShowMessage("Could not open payment page in browser.")
+                                            }
                                         } else {
                                             onShowMessage("Plan activated!")
                                             viewModel.loadSubscriptions(userId)

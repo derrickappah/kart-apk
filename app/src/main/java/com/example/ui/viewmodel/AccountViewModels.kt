@@ -23,6 +23,7 @@ data class ProfileUiState(
     val wishlist: List<WishlistRow> = emptyList(),
     val notifications: List<NotificationItem> = emptyList(),
     val followList: List<Profile> = emptyList(),
+    val followListLoading: Boolean = false,
     val actionLoading: Boolean = false,
     val error: String? = null,
     val feedback: String? = null
@@ -32,8 +33,12 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
     private val _uiState = MutableStateFlow(ProfileUiState())
     val uiState: StateFlow<ProfileUiState> = _uiState.asStateFlow()
 
+    private var loadProfileJob: kotlinx.coroutines.Job? = null
+    private var followInFlight = false
+
     fun loadProfile(targetUserId: String, currentUserId: String?) {
         val isDifferentUser = _uiState.value.bundle?.profile?.id != targetUserId
+        loadProfileJob?.cancel()
         _uiState.update {
             it.copy(
                 loading = true,
@@ -41,7 +46,7 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
                 error = null
             )
         }
-        viewModelScope.launch {
+        loadProfileJob = viewModelScope.launch {
             when (val res = repository.fetchProfileBundle(targetUserId, currentUserId)) {
                 is ApiResult.Success -> _uiState.update { it.copy(loading = false, bundle = res.data) }
                 is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = res.message) }
@@ -51,8 +56,9 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
 
     fun loadFollowList(userId: String, type: String) {
         viewModelScope.launch {
+            _uiState.update { it.copy(followList = emptyList(), followListLoading = true) }
             val users = repository.fetchFollowProfiles(userId, type)
-            _uiState.update { it.copy(followList = users) }
+            _uiState.update { it.copy(followList = users, followListLoading = false) }
         }
     }
 
@@ -61,14 +67,43 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
             _uiState.update { it.copy(feedback = "You cannot follow your own profile.") }
             return
         }
+        if (followInFlight) return
         val current = _uiState.value.bundle ?: return
+        followInFlight = true
         val next = !current.isFollowing
         val nextCount = (current.followersCount + if (next) 1 else -1).coerceAtLeast(0)
         _uiState.update { it.copy(bundle = current.copy(isFollowing = next, followersCount = nextCount)) }
         viewModelScope.launch {
-            when (val res = repository.toggleFollow(targetUserId)) {
-                is ApiResult.Error -> _uiState.update { it.copy(bundle = current, feedback = res.message) }
-                is ApiResult.Success -> Unit
+            try {
+                when (val res = repository.toggleFollow(targetUserId)) {
+                    is ApiResult.Error -> _uiState.update { state ->
+                        if (state.bundle?.profile?.id == current.profile.id) {
+                            state.copy(bundle = current, feedback = res.message)
+                        } else {
+                            state.copy(feedback = res.message)
+                        }
+                    }
+                    is ApiResult.Success -> {
+                        val serverFollowing = res.data
+                        if (serverFollowing != next) {
+                            val correctedCount = (current.followersCount +
+                                if (serverFollowing == current.isFollowing) 0
+                                else if (serverFollowing) 1 else -1).coerceAtLeast(0)
+                            _uiState.update { state ->
+                                if (state.bundle?.profile?.id == current.profile.id) {
+                                    state.copy(
+                                        bundle = state.bundle.copy(
+                                            isFollowing = serverFollowing,
+                                            followersCount = correctedCount
+                                        )
+                                    )
+                                } else state
+                            }
+                        }
+                    }
+                }
+            } finally {
+                followInFlight = false
             }
         }
     }
@@ -143,10 +178,31 @@ class ProfileViewModel(private val repository: KartRepository) : ViewModel() {
     }
 
     fun markNotificationRead(id: String) {
+        val prev = _uiState.value.notifications
         _uiState.update { state ->
             state.copy(notifications = state.notifications.map { if (it.id == id) it.copy(isRead = true) else it })
         }
-        viewModelScope.launch { repository.markNotificationRead(id) }
+        viewModelScope.launch {
+            if (repository.markNotificationRead(id) is ApiResult.Error) {
+                _uiState.update { it.copy(notifications = prev) }
+            }
+        }
+    }
+
+    fun markAllNotificationsRead(userId: String, onDone: () -> Unit = {}) {
+        if (userId.isBlank()) return
+        val prev = _uiState.value.notifications
+        _uiState.update { state ->
+            state.copy(notifications = state.notifications.map { it.copy(isRead = true) })
+        }
+        viewModelScope.launch {
+            when (val res = repository.markAllNotificationsRead(userId)) {
+                is ApiResult.Success -> onDone()
+                is ApiResult.Error -> _uiState.update {
+                    it.copy(notifications = prev, feedback = res.message)
+                }
+            }
+        }
     }
 
     fun deleteNotification(id: String) {
@@ -168,6 +224,8 @@ data class AdminUiState(
     val loading: Boolean = true,
     val bundle: AdminDashboardBundle? = null,
     val actionLoading: Boolean = false,
+    val isLiveConnected: Boolean = false,
+    val accessToken: String = "",
     val error: String? = null,
     val feedback: String? = null
 )
@@ -176,12 +234,67 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
     private val _uiState = MutableStateFlow(AdminUiState())
     val uiState: StateFlow<AdminUiState> = _uiState.asStateFlow()
 
-    fun loadDashboard() {
+    private val realtimeClient = com.example.data.remote.SupabaseAdminRealtimeClient()
+    private var realtimeJob: kotlinx.coroutines.Job? = null
+    private var connectionJob: kotlinx.coroutines.Job? = null
+    private var pendingRefreshJob: kotlinx.coroutines.Job? = null
+
+    fun startLiveUpdates() {
+        pendingRefreshJob?.cancel()
+        connectionJob?.cancel()
+        realtimeJob?.cancel()
+        connectionJob = viewModelScope.launch {
+            val token = repository.sessionStore.currentSession().accessToken
+            if (token.isBlank()) return@launch
+            realtimeClient.connect(token) {
+                repository.sessionStore.currentSession().accessToken
+            }
+            realtimeJob = launch {
+                realtimeClient.tableEvents.collect {
+                    pendingRefreshJob?.cancel()
+                    pendingRefreshJob = launch {
+                        kotlinx.coroutines.delay(1_000L)
+                        loadDashboard(forceRefresh = true, silent = true)
+                    }
+                }
+            }
+            realtimeClient.connected.collect { connected ->
+                _uiState.update { it.copy(isLiveConnected = connected) }
+            }
+        }
+    }
+
+    fun stopLiveUpdates() {
+        pendingRefreshJob?.cancel()
+        realtimeJob?.cancel()
+        connectionJob?.cancel()
+        realtimeClient.disconnect()
+        _uiState.update { it.copy(isLiveConnected = false) }
+    }
+
+    override fun onCleared() {
+        stopLiveUpdates()
+        super.onCleared()
+    }
+
+    fun loadDashboard(forceRefresh: Boolean = false, silent: Boolean = false) {
         viewModelScope.launch {
-            _uiState.update { it.copy(loading = true, error = null) }
+            val token = repository.sessionStore.currentSession().accessToken
+            val cached = repository.getCachedAdminBundle()
+            if (cached != null && _uiState.value.bundle == null) {
+                _uiState.update { it.copy(loading = false, bundle = cached, accessToken = token) }
+            }
+            if (!forceRefresh && repository.isAdminCacheFresh()) {
+                _uiState.update { it.copy(loading = false, bundle = cached, accessToken = token) }
+                return@launch
+            }
+            val showSpinner = !silent && cached == null && _uiState.value.bundle == null
+            if (showSpinner || (forceRefresh && !silent)) {
+                _uiState.update { it.copy(loading = true, error = null, accessToken = token) }
+            }
             when (val res = repository.fetchAdminBundle()) {
-                is ApiResult.Success -> _uiState.update { it.copy(loading = false, bundle = res.data) }
-                is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = res.message) }
+                is ApiResult.Success -> _uiState.update { it.copy(loading = false, bundle = res.data, accessToken = token) }
+                is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = if (silent || cached != null) it.error else res.message) }
             }
         }
     }
@@ -194,9 +307,13 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
         runAdminCall("Listing updated to $status") { repository.adminUpdateProductStatus(productId, status) }
     }
 
-    fun resolveVerification(requestId: String, approve: Boolean) {
+    fun deleteProduct(productId: String) {
+        runAdminCall("Listing deleted") { repository.adminDeleteProduct(productId) }
+    }
+
+    fun resolveVerification(requestId: String, approve: Boolean, adminNotes: String? = null) {
         runAdminCall("Verification ${if (approve) "approved" else "rejected"}") {
-            repository.adminResolveVerification(requestId, approve)
+            repository.adminResolveVerification(requestId, approve, adminNotes)
         }
     }
 
@@ -206,7 +323,48 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
+    fun resolveDeletionRequest(requestId: String, userId: String?, approve: Boolean) {
+        runAdminCall(
+            if (approve) "Account banned, listings suspended, and deletion approved"
+            else "Deletion request rejected"
+        ) {
+            repository.adminResolveDeletionRequest(requestId, userId, approve)
+        }
+    }
+
+    fun deleteReview(reviewId: String) {
+        runAdminCall("Review deleted") { repository.adminDeleteReview(reviewId) }
+    }
+
+    fun updateReportStatus(reportId: String, status: String) {
+        runAdminCall("Report marked $status") { repository.adminUpdateReportStatus(reportId, status) }
+    }
+
+    fun updateAdStatus(adId: String, status: String) {
+        runAdminCall("Ad updated to $status") { repository.adminUpdateAdStatus(adId, status) }
+    }
+
+    fun deleteAd(adId: String) {
+        runAdminCall("Ad deleted") { repository.adminDeleteAd(adId) }
+    }
+
+    fun addCampus(name: String, abbreviation: String?) {
+        runAdminCall("Campus added") { repository.adminAddCampus(name, abbreviation) }
+    }
+
+    fun updateCampus(id: String, name: String, abbreviation: String?) {
+        runAdminCall("Campus updated") { repository.adminUpdateCampus(id, name, abbreviation) }
+    }
+
+    fun deleteCampus(id: String) {
+        runAdminCall("Campus deleted") { repository.adminDeleteCampus(id) }
+    }
+
     fun resolveRefund(orderId: String, requestId: String, approve: Boolean) {
+        if (approve && orderId.isBlank()) {
+            _uiState.update { it.copy(feedback = "Cannot approve refund: Order ID is missing.") }
+            return
+        }
         runAdminCall("Refund ${if (approve) "processed" else "rejected"}") {
             repository.adminResolveRefund(orderId, requestId, approve)
         }
@@ -229,7 +387,7 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
                         )
                     }
                     onUpdated(enabled)
-                    loadDashboard()
+                    loadDashboard(forceRefresh = true, silent = true)
                 }
                 is ApiResult.Error -> {
                     _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
@@ -238,13 +396,68 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
+    fun setMaintenanceMode(enabled: Boolean, onUpdated: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(actionLoading = true) }
+            when (val res = repository.adminSetPlatformSetting(KartRepository.KEY_MAINTENANCE_MODE, enabled)) {
+                is ApiResult.Success -> {
+                    _uiState.update { state ->
+                        state.copy(
+                            actionLoading = false,
+                            bundle = state.bundle?.copy(isMaintenanceMode = enabled),
+                            feedback = if (enabled) {
+                                "Maintenance mode enabled for non-admin users"
+                            } else {
+                                "Maintenance mode disabled"
+                            }
+                        )
+                    }
+                    onUpdated(enabled)
+                    loadDashboard(forceRefresh = true, silent = true)
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
+                }
+            }
+        }
+    }
+
+    fun updatePromotionRates(boostRate: Double, featuredRate: Double, campusAdRate: Double) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(actionLoading = true) }
+            when (val res = repository.adminUpdatePromotionRates(boostRate, featuredRate, campusAdRate)) {
+                is ApiResult.Success -> {
+                    _uiState.update { state ->
+                        state.copy(
+                            actionLoading = false,
+                            bundle = state.bundle?.copy(
+                                promoBoostRate = boostRate,
+                                promoFeaturedRate = featuredRate,
+                                promoCampusAdRate = campusAdRate
+                            ),
+                            feedback = "Promotion rates updated"
+                        )
+                    }
+                    loadDashboard(forceRefresh = true, silent = true)
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
+                }
+            }
+        }
+    }
+
+    fun clearError() {
+        _uiState.update { it.copy(error = null) }
+    }
+
     private fun runAdminCall(successMsg: String, block: suspend () -> ApiResult<Unit>) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
             when (val res = block()) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(actionLoading = false, feedback = successMsg) }
-                    loadDashboard()
+                    loadDashboard(forceRefresh = true, silent = true)
                 }
                 is ApiResult.Error -> _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
             }

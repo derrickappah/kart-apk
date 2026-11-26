@@ -94,9 +94,7 @@ fun MarketplaceScreen(
     var showFilterSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(initialCategory) {
-        if (!initialCategory.isNullOrBlank() && state.filter.category != initialCategory) {
-            viewModel.setCategory(initialCategory)
-        }
+        viewModel.ensureInitialLoad(initialCategory)
     }
 
     val gridColumns = if (contentMaxWidth >= 840.dp) 4 else if (contentMaxWidth >= 600.dp) 3 else 2
@@ -231,7 +229,7 @@ fun MarketplaceScreen(
                                 cursorBrush = SolidColor(KartPrimary),
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                 keyboardActions = KeyboardActions(
-                                    onSearch = { viewModel.loadProducts(reset = true) }
+                                    onSearch = { viewModel.submitSearchNow() }
                                 ),
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -254,7 +252,7 @@ fun MarketplaceScreen(
                                     .clip(CircleShape)
                                     .clickable {
                                         viewModel.updateSearch("")
-                                        viewModel.loadProducts(reset = true)
+                                        viewModel.submitSearchNow()
                                     }
                             ) {
                                 Icon(
@@ -412,6 +410,39 @@ fun MarketplaceScreen(
                                     repeat(gridColumns) {
                                         ProductCardSkeleton(modifier = Modifier.weight(1f))
                                     }
+                                }
+                            }
+                        } else if (state.error != null) {
+                            item(key = "load_more_error") {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 20.dp, vertical = 12.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(MaterialTheme.colorScheme.errorContainer)
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    Text(
+                                        text = state.error ?: "Could not load more items.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = "Retry",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = KartPrimary,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable {
+                                                viewModel.loadProducts(reset = !state.hasMore)
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
                                 }
                             }
                         }

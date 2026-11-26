@@ -51,6 +51,8 @@ object KartLucideIcons {
     val SlidersHorizontal: ImageVector by lazy { buildSlidersHorizontal(BOLD_STROKE) }
     val Share2: ImageVector by lazy { buildShare2(BOLD_STROKE) }
     val Flag: ImageVector by lazy { buildFlag(BOLD_STROKE) }
+    val Ban: ImageVector by lazy { buildBan(BOLD_STROKE) }
+    val QrCode: ImageVector by lazy { buildQrCode(BOLD_STROKE) }
     val Send: ImageVector by lazy { buildSend(BOLD_STROKE) }
     val LogOut: ImageVector by lazy { buildLogOut(BOLD_STROKE) }
 
@@ -604,5 +606,27 @@ object KartLucideIcons {
         "M7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16",
         "M9.5 4h5L17 7h3a2 2 0 0 1 2 2v7.5",
         "M14.121 15.121A3 3 0 1 1 9.88 10.88"
+    )
+
+    private fun buildBan(s: Float) = lucideIcon(
+        "LucideBan_$s", s,
+        "M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0 -20",
+        "m4.9 4.9 14.2 14.2"
+    )
+
+    private fun buildQrCode(s: Float) = lucideIcon(
+        "LucideQrCode_$s", s,
+        "M3 3h5v5H3z",
+        "M16 3h5v5h-5z",
+        "M3 16h5v5H3z",
+        "M21 16h-3a2 2 0 0 0-2 2v3",
+        "M21 21v.01",
+        "M12 7v3a2 2 0 0 1-2 2H7",
+        "M3 12h.01",
+        "M12 3h.01",
+        "M12 16v.01",
+        "M16 12h1",
+        "M21 12v.01",
+        "M12 21v-1"
     )
 }

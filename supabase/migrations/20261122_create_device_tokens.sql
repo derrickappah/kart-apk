@@ -44,9 +44,7 @@ begin
   on conflict (fcm_token) do update
     set user_id = auth.uid(),
         platform = excluded.platform,
-        updated_at = now()
-    where public.device_tokens.user_id = auth.uid()
-       or public.device_tokens.updated_at < now() - interval '1 day';
+        updated_at = now();
 end;
 $$;
 

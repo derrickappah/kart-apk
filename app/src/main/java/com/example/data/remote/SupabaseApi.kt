@@ -1,5 +1,6 @@
 package com.example.data.remote
 
+import com.example.domain.model.AccountDeletionRequestRow
 import com.example.domain.model.ActiveAdvertisementRow
 import com.example.domain.model.AuthResponse
 import com.example.domain.model.CampusRow
@@ -26,8 +27,10 @@ import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Header
+import retrofit2.http.Headers
 import retrofit2.http.PATCH
 import retrofit2.http.POST
+import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
 import retrofit2.http.QueryMap
@@ -57,6 +60,15 @@ interface SupabaseApi {
 
     @POST("auth/v1/recover")
     suspend fun recoverPassword(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("auth/v1/verify")
+    suspend fun verifyOtp(@Body body: Map<String, String>): Response<AuthResponse>
+
+    @PUT("auth/v1/user")
+    suspend fun updateAuthUser(
+        @Header("Authorization") authorization: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any>
+    ): Response<Map<String, Any>>
 
     @POST("auth/v1/resend")
     suspend fun resendConfirmation(@Body body: Map<String, String>): Response<Map<String, Any>>
@@ -95,6 +107,26 @@ interface SupabaseApi {
         @QueryMap params: Map<String, String>
     ): Response<List<ActiveAdvertisementRow>>
 
+    @POST("rest/v1/rpc/get_home_promoted_products")
+    suspend fun getHomePromotedProducts(
+        @Body body: Map<String, @JvmSuppressWildcards Any> = mapOf("p_limit" to 20, "p_window_minutes" to 30)
+    ): Response<List<ActiveAdvertisementRow>>
+
+    @POST("rest/v1/rpc/get_home_recommended_products")
+    suspend fun getHomeRecommendedProducts(
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<List<Product>>
+
+    @Headers("Prefer: return=representation")
+    @PATCH("rest/v1/advertisements")
+    suspend fun updateAdvertisement(
+        @Query("id") idFilter: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<List<ActiveAdvertisementRow>>
+
+    @DELETE("rest/v1/advertisements")
+    suspend fun deleteAdvertisement(@Query("id") idFilter: String): Response<Unit>
+
     // --- Profiles & Follows ---
     @GET("rest/v1/profiles")
     suspend fun getProfiles(@QueryMap params: Map<String, String>): Response<List<Profile>>
@@ -131,6 +163,13 @@ interface SupabaseApi {
         @Body body: Map<String, @JvmSuppressWildcards Any>
     ): Response<Unit>
 
+    @PATCH("rest/v1/notifications")
+    suspend fun markAllNotificationsRead(
+        @Query("user_id") userIdFilter: String,
+        @Query("is_read") isReadFilter: String = "eq.false",
+        @Body body: Map<String, @JvmSuppressWildcards Any>
+    ): Response<Unit>
+
     // --- Conversations & Messages ---
     @GET("rest/v1/conversations")
     suspend fun getConversations(@QueryMap params: Map<String, String>): Response<List<ConversationRow>>
@@ -160,6 +199,9 @@ interface SupabaseApi {
     @GET("rest/v1/reviews")
     suspend fun getReviews(@QueryMap params: Map<String, String>): Response<List<Review>>
 
+    @DELETE("rest/v1/reviews")
+    suspend fun deleteReview(@Query("id") idFilter: String): Response<Unit>
+
     // --- Subscriptions ---
     @GET("rest/v1/subscription_plans")
     suspend fun getSubscriptionPlans(@QueryMap params: Map<String, String>): Response<List<SubscriptionPlan>>
@@ -188,12 +230,43 @@ interface SupabaseApi {
     @GET("rest/v1/campuses")
     suspend fun getCampuses(@QueryMap params: Map<String, String>): Response<List<CampusRow>>
 
+    @Headers("Prefer: return=representation")
+    @POST("rest/v1/campuses")
+    suspend fun createCampus(@Body body: Map<String, @JvmSuppressWildcards Any?>): Response<List<CampusRow>>
+
+    @Headers("Prefer: return=representation")
+    @PATCH("rest/v1/campuses")
+    suspend fun updateCampus(
+        @Query("id") idFilter: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<List<CampusRow>>
+
+    @DELETE("rest/v1/campuses")
+    suspend fun deleteCampus(@Query("id") idFilter: String): Response<Unit>
+
     // --- Admin & Compliance Tables ---
     @GET("rest/v1/verification_requests")
     suspend fun getVerificationRequests(@QueryMap params: Map<String, String>): Response<List<VerificationRequestRow>>
 
+    @GET("rest/v1/account_deletion_requests")
+    suspend fun getAccountDeletionRequests(@QueryMap params: Map<String, String>): Response<List<AccountDeletionRequestRow>>
+
+    @Headers("Prefer: return=representation")
+    @PATCH("rest/v1/account_deletion_requests")
+    suspend fun updateAccountDeletionRequest(
+        @Query("id") idFilter: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<List<AccountDeletionRequestRow>>
+
     @GET("rest/v1/reports")
     suspend fun getReports(@QueryMap params: Map<String, String>): Response<List<ReportRow>>
+
+    @Headers("Prefer: return=representation")
+    @PATCH("rest/v1/reports")
+    suspend fun updateReport(
+        @Query("id") idFilter: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<List<ReportRow>>
 
     @GET("rest/v1/withdrawal_requests")
     suspend fun getWithdrawalRequests(@QueryMap params: Map<String, String>): Response<List<WithdrawalRequestRow>>

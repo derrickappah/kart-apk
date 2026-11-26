@@ -544,7 +544,7 @@ fun FilterBottomSheet(
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     KartTextField(
                         value = minPrice,
-                        onValueChange = { minPrice = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        onValueChange = { minPrice = com.example.domain.model.KartFormatters.sanitizeDecimalInput(it) },
                         label = "Min",
                         placeholder = "0",
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -552,7 +552,7 @@ fun FilterBottomSheet(
                     )
                     KartTextField(
                         value = maxPrice,
-                        onValueChange = { maxPrice = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        onValueChange = { maxPrice = com.example.domain.model.KartFormatters.sanitizeDecimalInput(it) },
                         label = "Max",
                         placeholder = "5000",
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -654,13 +654,20 @@ fun FilterBottomSheet(
                         .map { it.name }
                         .filter { it in selectedConditions }
                         .joinToString(",")
+                    val parsedMin = minPrice.toDoubleOrNull()
+                    val parsedMax = maxPrice.toDoubleOrNull()
+                    val (resolvedMin, resolvedMax) = if (parsedMin != null && parsedMax != null && parsedMin > parsedMax) {
+                        maxPrice to minPrice
+                    } else {
+                        minPrice to maxPrice
+                    }
                     onApply(
                         currentFilter.copy(
                             category = category,
                             condition = orderedConditions,
                             campus = campus,
-                            minPrice = minPrice,
-                            maxPrice = maxPrice,
+                            minPrice = resolvedMin,
+                            maxPrice = resolvedMax,
                             sort = sort
                         )
                     )

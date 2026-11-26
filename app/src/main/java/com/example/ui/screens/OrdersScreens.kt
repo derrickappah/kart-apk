@@ -79,7 +79,7 @@ fun OrdersListScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var statusFilter by remember { mutableStateOf("All") }
-    val filters = listOf("All", "Pending", "Paid", "Shipped", "Delivered", "Completed", "Refunded")
+    val filters = listOf("All", "Pending", "Paid", "Shipped", "Delivered", "Completed", "Disputed", "Refunded", "Cancelled")
 
     LaunchedEffect(userId, asSeller) {
         viewModel.loadOrders(userId, asSeller)
@@ -117,6 +117,18 @@ fun OrdersListScreen(
                 ) {
                     repeat(4) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(98.dp)) }
                 }
+            }
+            state.error != null && state.orders.isEmpty() -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.ERROR,
+                    title = "Could not load orders",
+                    subtitle = state.error ?: "Check your connection and try again.",
+                    actionLabel = "Retry",
+                    onActionClick = { viewModel.loadOrders(userId, asSeller) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
             }
             filteredOrders.isEmpty() -> {
                 EmptyStateView(
@@ -206,7 +218,10 @@ fun OrderDetailScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tokens = KartThemeTokens.colors
     var showDeliveryModal by remember { mutableStateOf(false) }
+    var showBuyerQrScanner by remember { mutableStateOf(false) }
     var showRefundModal by remember { mutableStateOf(false) }
+    var showCancelModal by remember { mutableStateOf(false) }
+    var showSellerQrModal by remember { mutableStateOf(false) }
     var showReviewModal by remember { mutableStateOf(false) }
 
     LaunchedEffect(orderId) {
@@ -255,7 +270,7 @@ fun OrderDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                if (state.hasReviewedOrder) {
+                if (isBuyer && state.hasReviewedOrder) {
                     item {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = KartSuccessContainer),
@@ -388,7 +403,28 @@ fun OrderDetailScreen(
                 // Contextual Buyer & Seller Actions
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (state.hasPendingRefund || statusLower == "disputed") {
+                        val hasRefundBlock = state.hasPendingRefund || state.hasApprovedRefund
+                        if (state.hasApprovedRefund || statusLower == "refunded") {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = KartSuccessContainer),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(14.dp)
+                                ) {
+                                    Icon(KartLucideIcons.CheckCircle, contentDescription = null, tint = KartSuccess)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = "Refund has been approved and processed by Kart Escrow.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = KartSuccess
+                                    )
+                                }
+                            }
+                        } else if (state.hasPendingRefund || statusLower == "disputed") {
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = KartWarningContainer),
                                 shape = RoundedCornerShape(14.dp),
@@ -410,7 +446,18 @@ fun OrderDetailScreen(
                             }
                         }
 
-                        if (isSeller && statusLower == "paid" && !state.hasPendingRefund) {
+                        if (isBuyer && statusLower == "pending") {
+                            KartOutlineButton(
+                                text = "Cancel Pending Order",
+                                enabled = !state.actionLoading,
+                                borderColor = KartDanger,
+                                contentColor = KartDanger,
+                                onClick = { showCancelModal = true },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        if (isSeller && statusLower == "paid" && !hasRefundBlock) {
                             KartPrimaryButton(
                                 text = "Mark as Shipped / Ready for Handoff",
                                 icon = KartLucideIcons.Truck,
@@ -420,7 +467,20 @@ fun OrderDetailScreen(
                             )
                         }
 
-                        if (isBuyer && statusLower == "paid" && !state.hasPendingRefund) {
+                        if (isSeller && statusLower == "shipped" && !hasRefundBlock) {
+                            KartPrimaryButton(
+                                text = "Show Handover QR Code",
+                                icon = KartLucideIcons.QrCode,
+                                enabled = !state.actionLoading,
+                                onClick = {
+                                    showSellerQrModal = true
+                                    viewModel.generateDeliveryQr(order.id)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        if (isBuyer && statusLower == "paid" && !hasRefundBlock) {
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = KartInfoContainer),
                                 shape = RoundedCornerShape(14.dp),
@@ -441,19 +501,23 @@ fun OrderDetailScreen(
                             }
                         }
 
-                        if (isBuyer && statusLower == "shipped" && !state.hasPendingRefund) {
+                        if (isBuyer && statusLower == "shipped" && !hasRefundBlock) {
                             KartPrimaryButton(
                                 text = "Confirm Delivery & Release Escrow",
                                 icon = KartLucideIcons.ShieldCheck,
                                 loading = state.actionLoading,
-                                onClick = { showDeliveryModal = true },
+                                onClick = {
+                                    viewModel.clearDeliveryModalState()
+                                    showDeliveryModal = true
+                                },
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
 
-                        if (isBuyer && statusLower in setOf("paid", "shipped") && !state.hasPendingRefund) {
+                        if (isBuyer && statusLower in setOf("paid", "shipped") && !hasRefundBlock) {
                             KartOutlineButton(
                                 text = "Request Refund",
+                                enabled = !state.actionLoading,
                                 borderColor = KartDanger,
                                 contentColor = KartDanger,
                                 onClick = { showRefundModal = true },
@@ -465,6 +529,7 @@ fun OrderDetailScreen(
                             KartPrimaryButton(
                                 text = "Rate Seller & Write Review",
                                 icon = KartLucideIcons.StarFilled,
+                                enabled = !state.actionLoading,
                                 onClick = { showReviewModal = true },
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -483,8 +548,21 @@ fun OrderDetailScreen(
             if (showDeliveryModal) {
                 DeliveryVerificationDialog(
                     isSubmitting = state.actionLoading,
-                    onDismiss = { showDeliveryModal = false },
+                    isSendingOtp = state.otpSending,
+                    otpSent = state.otpSent,
+                    errorMessage = state.deliveryActionError,
+                    statusMessage = state.deliveryActionNotice,
+                    onClearStatus = { viewModel.clearDeliveryMessages() },
+                    onDismiss = {
+                        viewModel.clearDeliveryModalState()
+                        showDeliveryModal = false
+                    },
                     onSendOtp = { viewModel.sendDeliveryOtp(order.id) },
+                    onOpenQrScanner = {
+                        viewModel.clearDeliveryModalState()
+                        showDeliveryModal = false
+                        showBuyerQrScanner = true
+                    },
                     onConfirm = { code, mode ->
                         viewModel.confirmDelivery(order.id, code, mode) {
                             showDeliveryModal = false
@@ -493,13 +571,68 @@ fun OrderDetailScreen(
                 )
             }
 
+            if (showBuyerQrScanner) {
+                com.example.ui.components.BuyerQrScannerDialog(
+                    isSubmitting = state.actionLoading,
+                    onQrScanned = { qrToken ->
+                        viewModel.confirmDelivery(order.id, qrToken, "qr") {
+                            showBuyerQrScanner = false
+                        }
+                    },
+                    onDismiss = { showBuyerQrScanner = false }
+                )
+            }
+
+            if (showSellerQrModal) {
+                com.example.ui.components.SellerDeliveryQrDialog(
+                    qrData = state.deliveryQr,
+                    loading = state.qrLoading,
+                    error = state.qrError,
+                    onRegenerate = { viewModel.generateDeliveryQr(order.id) },
+                    onDismiss = {
+                        showSellerQrModal = false
+                        viewModel.clearDeliveryQr()
+                    }
+                )
+            }
+
+            if (showCancelModal) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { if (!state.actionLoading) showCancelModal = false },
+                    title = { Text("Cancel Pending Order?", fontWeight = FontWeight.Bold) },
+                    text = {
+                        Text("Are you sure you want to cancel this unpaid order? You can still repurchase the item later if it remains in stock.")
+                    },
+                    confirmButton = {
+                        KartPrimaryButton(
+                            text = "Cancel Order",
+                            loading = state.actionLoading,
+                            enabled = !state.actionLoading,
+                            containerColor = KartDanger,
+                            onClick = {
+                                viewModel.cancelOrder(order.id) {
+                                    showCancelModal = false
+                                }
+                            }
+                        )
+                    },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(
+                            enabled = !state.actionLoading,
+                            onClick = { showCancelModal = false }
+                        ) { Text("Keep Order") }
+                    }
+                )
+            }
+
             if (showRefundModal) {
                 RefundRequestDialog(
                     isSubmitting = state.actionLoading,
-                    onDismiss = { showRefundModal = false },
+                    onDismiss = { if (!state.actionLoading) showRefundModal = false },
                     onSubmit = { reason ->
-                        showRefundModal = false
-                        viewModel.requestRefund(order.id, reason)
+                        viewModel.requestRefund(order.id, reason) {
+                            showRefundModal = false
+                        }
                     }
                 )
             }

@@ -66,6 +66,12 @@ interface KartWebApi {
     @POST("api/orders/confirm-delivery")
     suspend fun confirmDelivery(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
 
+    @POST("api/orders/delivery-qr")
+    suspend fun generateDeliveryQr(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/orders/cancel")
+    suspend fun cancelOrder(@Body body: Map<String, String>): Response<Map<String, Any>>
+
     @POST("api/orders/request-refund")
     suspend fun requestRefund(@Body body: Map<String, String>): Response<Map<String, Any>>
 
@@ -137,6 +143,18 @@ interface KartWebApi {
 
     @POST("api/auth/verify-phone")
     suspend fun verifyPhoneOtp(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/auth/mobile/exchange")
+    suspend fun exchangeMobileAuthCode(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/users/block")
+    suspend fun blockUser(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/users/unblock")
+    suspend fun unblockUser(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @GET("api/users/blocked")
+    suspend fun getBlockedUsers(): Response<Map<String, Any>>
 
     @POST("api/verification/request")
     suspend fun submitVerificationRequest(@Body body: Map<String, @JvmSuppressWildcards Any?>): Response<Map<String, Any>>

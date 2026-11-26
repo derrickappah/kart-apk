@@ -60,10 +60,17 @@ fun HomeScreen(
     onExploreMarketplace: () -> Unit,
     onProductClick: (Product) -> Unit,
     onWishlistToggle: (String) -> Unit,
-    onInfoPageClick: (String) -> Unit
+    onInfoPageClick: (String) -> Unit = {},
+    onShowMessage: (String) -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+
+    androidx.compose.runtime.LaunchedEffect(state.error, state.feed != null) {
+        if (state.error != null && state.feed != null) {
+            onShowMessage(state.error ?: "Could not refresh listings.")
+        }
+    }
     val density = LocalDensity.current
     val fillStartPx = remember(density) { with(density) { 240.dp.toPx() } }
     val fillEndPx = remember(density) { with(density) { 310.dp.toPx() } }
@@ -258,7 +265,10 @@ fun HomeScreen(
                                         KartProductCard(
                                             product = product,
                                             isWishlisted = product.id in wishlistIds,
-                                            onProductClick = onProductClick,
+                                            onProductClick = {
+                                                viewModel.trackAdClick(it.advertisementId)
+                                                onProductClick(it)
+                                            },
                                             onWishlistToggle = onWishlistToggle,
                                             modifier = Modifier.weight(1f)
                                         )

@@ -6,6 +6,7 @@ import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -26,24 +27,32 @@ import com.example.ui.theme.KartDanger
 import java.io.File
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.StartOffset
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.draw.shadow
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -89,9 +98,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -102,6 +115,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -118,6 +132,7 @@ import com.example.ui.components.KartSearchBar
 import com.example.ui.components.ShimmerBox
 import com.example.ui.components.UserAvatar
 import com.example.ui.theme.KartPrimary
+import com.example.ui.theme.KartSuccess
 import com.example.ui.theme.KartThemeTokens
 import com.example.ui.viewmodel.MessagesViewModel
 import kotlinx.coroutines.delay
@@ -154,6 +169,7 @@ fun MessagesInboxScreen(
     }
 
     LaunchedEffect(userId) {
+        viewModel.startRealtime(userId)
         viewModel.loadConversations(userId)
         while (true) {
             delay(8000L)
@@ -277,6 +293,30 @@ fun MessagesInboxScreen(
                     repeat(5) { ShimmerBox(modifier = Modifier.fillMaxWidth().height(72.dp)) }
                 }
             }
+            state.error != null && state.conversations.isEmpty() -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.MESSAGES,
+                    title = "Unable to load messages",
+                    subtitle = state.error ?: "Check your connection and try again.",
+                    actionLabel = "Retry",
+                    onActionClick = { viewModel.loadConversations(userId) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
+            }
+            filtered.isEmpty() && search.isNotBlank() -> {
+                EmptyStateView(
+                    asset = EmptyStateAsset.SEARCH,
+                    title = "No matching chats",
+                    subtitle = "No conversations match \"$search\". Try a different name or item title.",
+                    actionLabel = "Clear Search",
+                    onActionClick = { search = "" },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
+            }
             filtered.isEmpty() -> {
                 EmptyStateView(
                     asset = EmptyStateAsset.MESSAGES,
@@ -305,6 +345,8 @@ fun MessagesInboxScreen(
                         ) {
                             ConversationRowItem(
                                 conversation = conv,
+                                isOnline = conv.otherUser.id in state.onlineUserIds,
+                                isTyping = conv.otherUser.id in state.typingUsersByConversation[conv.id].orEmpty(),
                                 onClick = { onConversationClick(conv.id) }
                             )
                             HorizontalDivider(color = tokens.cardBorder, modifier = Modifier.padding(start = 82.dp))
@@ -319,6 +361,8 @@ fun MessagesInboxScreen(
 @Composable
 private fun ConversationRowItem(
     conversation: EnrichedConversation,
+    isOnline: Boolean = false,
+    isTyping: Boolean = false,
     onClick: () -> Unit
 ) {
     val tokens = KartThemeTokens.colors
@@ -329,12 +373,22 @@ private fun ConversationRowItem(
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
-        UserAvatar(
-            avatarUrl = conversation.otherUser.avatarUrl,
-            displayName = conversation.otherUser.resolvedName,
-            size = 50.dp,
-            isVerified = conversation.otherUser.isVerified == true
-        )
+        Box {
+            UserAvatar(
+                avatarUrl = conversation.otherUser.avatarUrl,
+                displayName = conversation.otherUser.resolvedName,
+                size = 50.dp,
+                isVerified = conversation.otherUser.isVerified == true
+            )
+            OnlineDotBadge(
+                visible = isOnline,
+                borderColor = MaterialTheme.colorScheme.background,
+                dotSize = 14.dp,
+                modifier = Modifier.align(
+                    if (conversation.otherUser.isVerified == true) Alignment.TopEnd else Alignment.BottomEnd
+                )
+            )
+        }
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(
@@ -368,10 +422,14 @@ private fun ConversationRowItem(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = KartFormatters.messageSnippet(conversation.lastMessage?.content),
+                    text = if (isTyping) "Typing..." else KartFormatters.messageSnippet(conversation.lastMessage?.content),
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (conversation.unreadCount > 0) tokens.textPrimary else tokens.textSecondary,
-                    fontWeight = if (conversation.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal,
+                    color = when {
+                        isTyping -> KartPrimary
+                        conversation.unreadCount > 0 -> tokens.textPrimary
+                        else -> tokens.textSecondary
+                    },
+                    fontWeight = if (isTyping || conversation.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -403,6 +461,9 @@ fun ChatThreadScreen(
     conversationId: String,
     currentUserId: String,
     viewModel: MessagesViewModel,
+    blockedUserIds: Set<String> = emptySet(),
+    onBlockUser: (String, () -> Unit) -> Unit = { _, _ -> },
+    onUnblockUser: (String, () -> Unit) -> Unit = { _, _ -> },
     onBack: () -> Unit,
     onProductClick: (String) -> Unit,
     onShowMessage: (String) -> Unit,
@@ -411,13 +472,30 @@ fun ChatThreadScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tokens = KartThemeTokens.colors
     val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val threadScope = androidx.compose.runtime.rememberCoroutineScope()
+    val reduceMotion = remember(context) {
+        runCatching {
+            Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+        }.getOrDefault(false)
+    }
     val listState = rememberLazyListState()
     var messageInput by remember { mutableStateOf("") }
+    var replyingTo by remember(conversationId) { mutableStateOf<ReplyDraft?>(null) }
+    var highlightedMessageId by remember(conversationId) { mutableStateOf<String?>(null) }
     var previewImageUrl by remember { mutableStateOf<String?>(null) }
     var showHeaderMenu by remember { mutableStateOf(false) }
     var showReportDialog by remember { mutableStateOf(false) }
+    var showBlockDialog by remember { mutableStateOf(false) }
 
     val conv = state.conversations.firstOrNull { it.id == conversationId }
+    val otherUserId = conv?.otherUser?.id.orEmpty()
+    val isOtherBlocked = otherUserId.isNotBlank() && otherUserId in blockedUserIds
+    val isOtherOnline = !isOtherBlocked && otherUserId.isNotBlank() && otherUserId in state.onlineUserIds
+    val isOtherTyping = !isOtherBlocked && otherUserId.isNotBlank() &&
+        otherUserId in state.typingUsersByConversation[conversationId].orEmpty()
+    val attachedProduct = state.pendingProductAttachment?.takeIf { it.first == conversationId }?.second
 
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -438,11 +516,10 @@ fun ChatThreadScreen(
     var playbackRemainingSec by remember { mutableStateOf<Int?>(null) }
 
     fun stopPlayback() {
-        runCatching {
-            mediaPlayerRef?.stop()
-            mediaPlayerRef?.release()
-        }
+        val mp = mediaPlayerRef
         mediaPlayerRef = null
+        runCatching { mp?.stop() }
+        runCatching { mp?.release() }
         playingUrl = null
         playbackProgress = 0f
         playbackRemainingSec = null
@@ -454,8 +531,9 @@ fun ChatThreadScreen(
             return
         }
         stopPlayback()
+        var mp: MediaPlayer? = null
         try {
-            val mp = MediaPlayer().apply {
+            mp = MediaPlayer().apply {
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -475,6 +553,9 @@ fun ChatThreadScreen(
             mediaPlayerRef = mp
             playingUrl = url
         } catch (_: Exception) {
+            if (mediaPlayerRef !== mp) {
+                runCatching { mp?.release() }
+            }
             stopPlayback()
             onShowMessage("Could not play voice message.")
         }
@@ -483,9 +564,10 @@ fun ChatThreadScreen(
     fun startRecording() {
         stopPlayback()
         val outFile = File(context.cacheDir, "voice_${System.currentTimeMillis()}.m4a")
+        var rec: MediaRecorder? = null
         try {
             @Suppress("DEPRECATION")
-            val rec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else MediaRecorder()
+            rec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else MediaRecorder()
             rec.apply {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
@@ -501,6 +583,9 @@ fun ChatThreadScreen(
             recordingSeconds = 0
             isRecording = true
         } catch (_: Exception) {
+            if (recorderRef !== rec) {
+                runCatching { rec?.release() }
+            }
             runCatching { outFile.delete() }
             isRecording = false
             onShowMessage("Could not start voice recording.")
@@ -515,10 +600,8 @@ fun ChatThreadScreen(
         recordingFile = null
         isRecording = false
         recordingSeconds = 0
-        runCatching {
-            rec?.stop()
-            rec?.release()
-        }
+        runCatching { rec?.stop() }
+        runCatching { rec?.release() }
         if (send && file != null && file.exists() && file.length() > 0L) {
             viewModel.sendVoiceMessage(conversationId, currentUserId, file, dur)
         } else {
@@ -560,18 +643,24 @@ fun ChatThreadScreen(
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(conversationId) {
         onDispose {
+            viewModel.leaveConversation(conversationId, currentUserId)
+            viewModel.clearPendingProductAttachment(conversationId)
             stopPlayback()
-            runCatching {
-                recorderRef?.stop()
-                recorderRef?.release()
-            }
+            val rec = recorderRef
+            recorderRef = null
+            runCatching { rec?.stop() }
+            runCatching { rec?.release() }
             runCatching { recordingFile?.delete() }
         }
     }
 
     LaunchedEffect(conversationId, currentUserId) {
+        if (currentUserId.isNotBlank()) {
+            viewModel.startRealtime(currentUserId)
+        }
+        viewModel.enterConversation(conversationId)
         if (conv == null && currentUserId.isNotBlank()) {
             viewModel.loadConversations(currentUserId)
         }
@@ -636,12 +725,23 @@ fun ChatThreadScreen(
                             }
                             .padding(vertical = 4.dp, horizontal = 4.dp)
                     ) {
-                        UserAvatar(
-                            avatarUrl = conv?.otherUser?.avatarUrl,
-                            displayName = conv?.otherUser?.resolvedName ?: "Campus Chat",
-                            size = 38.dp,
-                            isVerified = conv?.otherUser?.isVerified == true
-                        )
+                        Box {
+                            UserAvatar(
+                                avatarUrl = conv?.otherUser?.avatarUrl,
+                                displayName = conv?.otherUser?.resolvedName ?: "Campus Chat",
+                                size = 38.dp,
+                                isVerified = conv?.otherUser?.isVerified == true
+                            )
+                            OnlineDotBadge(
+                                visible = isOtherOnline,
+                                borderColor = MaterialTheme.colorScheme.background,
+                                dotSize = 12.dp,
+                                reduceMotion = reduceMotion,
+                                modifier = Modifier.align(
+                                    if (conv?.otherUser?.isVerified == true) Alignment.TopEnd else Alignment.BottomEnd
+                                )
+                            )
+                        }
                         Spacer(Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -652,12 +752,55 @@ fun ChatThreadScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            if (!conv?.otherUser?.campus.isNullOrBlank()) {
-                                Text(
-                                    text = conv.otherUser.campus.orEmpty(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = tokens.textSecondary
-                                )
+                            val campusLabel = conv?.otherUser?.campus?.takeIf { it.isNotBlank() }
+                            val statusMode = when {
+                                isOtherTyping -> "typing"
+                                isOtherOnline -> "online"
+                                campusLabel != null -> "campus"
+                                else -> "none"
+                            }
+                            val easeOutStrong = remember { CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
+                            AnimatedContent(
+                                targetState = statusMode to campusLabel,
+                                transitionSpec = {
+                                    fadeIn(tween(160, easing = easeOutStrong)) togetherWith
+                                        fadeOut(tween(120, easing = easeOutStrong))
+                                },
+                                label = "chatHeaderStatus"
+                            ) { (mode, campus) ->
+                                when (mode) {
+                                    "typing" -> Text(
+                                        text = "Typing...",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = KartPrimary
+                                    )
+                                    "online" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "Online",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Medium,
+                                            color = KartSuccess
+                                        )
+                                        if (campus != null) {
+                                            Text(
+                                                text = " · $campus",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = tokens.textSecondary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    "campus" -> Text(
+                                        text = campus.orEmpty(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = tokens.textSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    else -> Spacer(Modifier.height(0.dp))
+                                }
                             }
                         }
                     }
@@ -719,10 +862,37 @@ fun ChatThreadScreen(
                                     }
                                 }
                             )
+                            if (otherUserId.isNotBlank()) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (isOtherBlocked) "Unblock User" else "Block User",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = if (isOtherBlocked) tokens.textPrimary else KartDanger
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            KartLucideIcons.Ban,
+                                            contentDescription = null,
+                                            tint = if (isOtherBlocked) tokens.textPrimary else KartDanger,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    onClick = {
+                                        showHeaderMenu = false
+                                        if (isOtherBlocked) {
+                                            onUnblockUser(otherUserId) {}
+                                        } else {
+                                            showBlockDialog = true
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
-                if (conv?.product != null) {
+                if (conv?.product != null && attachedProduct == null) {
                     HorizontalDivider(color = tokens.cardBorder)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -769,19 +939,24 @@ fun ChatThreadScreen(
         ) {
             itemsIndexed(
                 reversedMessages,
-                key = { _, it -> it.id ?: "${it.createdAt}_${it.content.hashCode()}" }
+                key = { index, it -> it.id ?: "anon_${index}_${it.createdAt}_${it.content.hashCode()}" }
             ) { index, msg ->
                 val isMine = msg.senderId == currentUserId
                 val isPending = msg.id?.startsWith("local_") == true
-                val voicePayload = KartFormatters.extractMessageVoice(msg.content)
-                val imageUrl = if (voicePayload == null) KartFormatters.extractMessageImageUrl(msg.content) else null
+                val replyPayload = KartFormatters.extractMessageReply(msg.content)
+                val bodyContent = replyPayload?.body ?: msg.content
+                val voicePayload = KartFormatters.extractMessageVoice(bodyContent)
+                val imageUrl = if (voicePayload == null) KartFormatters.extractMessageImageUrl(bodyContent) else null
+                val productPayload = if (voicePayload == null && imageUrl == null) {
+                    KartFormatters.extractMessageProduct(bodyContent)
+                } else null
                 val formattedTime = KartFormatters.formatChatTime(msg.createdAt)
                 val newerMsg = reversedMessages.getOrNull(index - 1)
                 val isLastInGroup = newerMsg == null ||
                     newerMsg.senderId != msg.senderId ||
                     KartFormatters.formatChatTime(newerMsg.createdAt) != formattedTime
 
-                val enterProgress = remember(msg.id) { Animatable(if (isPending) 0f else 1f) }
+                val enterProgress = remember(msg.id) { Animatable(if (isPending && !reduceMotion) 0f else 1f) }
                 LaunchedEffect(msg.id) {
                     if (enterProgress.value < 1f) {
                         enterProgress.animateTo(
@@ -799,17 +974,128 @@ fun ChatThreadScreen(
                     label = "msgDeliveryAlpha"
                 )
 
+                val dragOffsetX = remember(msg.id) { Animatable(0f) }
+                var thresholdHapticFired by remember(msg.id) { mutableStateOf(false) }
+                val swipeThresholdPx = with(density) { 46.dp.toPx() }
+                val maxSwipePx = with(density) { 68.dp.toPx() }
+                val swipeProgress = (dragOffsetX.value / swipeThresholdPx).coerceIn(0f, 1f)
+
+                val isHighlighted = !msg.id.isNullOrBlank() && msg.id == highlightedMessageId
+                val highlightAlpha by animateFloatAsState(
+                    targetValue = if (isHighlighted) 0.16f else 0f,
+                    animationSpec = tween(
+                        durationMillis = if (isHighlighted) 160 else 280,
+                        easing = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)
+                    ),
+                    label = "replyJumpHighlight"
+                )
+
+                fun triggerReplyForCurrentMessage() {
+                    val targetId = msg.id ?: return
+                    if (targetId.startsWith("local_")) return
+                    val senderLabel = if (isMine) "You" else (conv?.otherUser?.resolvedName ?: "Seller")
+                    val snippet = KartFormatters.messageSnippet(msg.content)
+                    replyingTo = ReplyDraft(
+                        messageId = targetId,
+                        senderName = senderLabel,
+                        snippet = snippet
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = if (isLastInGroup) 10.dp else 0.dp)
+                        .background(KartPrimary.copy(alpha = highlightAlpha), RoundedCornerShape(14.dp))
+                        .pointerInput(msg.id, reduceMotion) {
+                            detectHorizontalDragGestures(
+                                onDragStart = { thresholdHapticFired = false },
+                                onDragEnd = {
+                                    val triggered = dragOffsetX.value >= swipeThresholdPx
+                                    if (triggered) {
+                                        triggerReplyForCurrentMessage()
+                                    }
+                                    threadScope.launch {
+                                        if (reduceMotion) {
+                                            dragOffsetX.snapTo(0f)
+                                        } else {
+                                            dragOffsetX.animateTo(
+                                                targetValue = 0f,
+                                                animationSpec = spring(
+                                                    dampingRatio = 0.78f,
+                                                    stiffness = Spring.StiffnessMediumLow
+                                                )
+                                            )
+                                        }
+                                    }
+                                },
+                                onDragCancel = {
+                                    threadScope.launch {
+                                        if (reduceMotion) {
+                                            dragOffsetX.snapTo(0f)
+                                        } else {
+                                            dragOffsetX.animateTo(
+                                                targetValue = 0f,
+                                                animationSpec = spring(
+                                                    dampingRatio = 0.78f,
+                                                    stiffness = Spring.StiffnessMediumLow
+                                                )
+                                            )
+                                        }
+                                    }
+                                },
+                                onHorizontalDrag = { _, dragAmount ->
+                                    val current = dragOffsetX.value
+                                    val resistance = if (current > swipeThresholdPx) 0.35f else 0.85f
+                                    val next = (current + dragAmount * resistance).coerceIn(0f, maxSwipePx)
+                                    if (!thresholdHapticFired && next >= swipeThresholdPx) {
+                                        thresholdHapticFired = true
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
+                                    threadScope.launch { dragOffsetX.snapTo(next) }
+                                }
+                            )
+                        }
+                ) {
+                    if (swipeProgress > 0.02f) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .padding(start = 6.dp)
+                                .size(30.dp)
+                                .graphicsLayer {
+                                    alpha = swipeProgress
+                                    val iconScale = if (reduceMotion) 1f else (0.85f + 0.15f * swipeProgress)
+                                    scaleX = iconScale
+                                    scaleY = iconScale
+                                }
+                                .clip(CircleShape)
+                                .background(
+                                    if (swipeProgress >= 1f) KartPrimary
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                        ) {
+                            Icon(
+                                imageVector = ReplyArrowIcon,
+                                contentDescription = "Reply",
+                                tint = if (swipeProgress >= 1f) Color.White else tokens.textSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
                 Row(
                     horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
                     verticalAlignment = Alignment.Bottom,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = if (isLastInGroup) 10.dp else 0.dp)
                         .graphicsLayer {
                             val p = enterProgress.value
                             alpha = p * deliveryAlpha
-                            translationY = (1f - p) * 18f
-                            val s = 0.94f + (0.06f * p)
+                            translationX = dragOffsetX.value
+                            translationY = if (reduceMotion) 0f else (1f - p) * 18f
+                            val s = if (reduceMotion) 1f else (0.94f + (0.06f * p))
                             scaleX = s
                             scaleY = s
                         }
@@ -833,8 +1119,33 @@ fun ChatThreadScreen(
                                     color = if (isMine) Color.Transparent else tokens.cardBorder,
                                     shape = bubbleShape
                                 )
-                                .padding(if (imageUrl != null) 4.dp else 12.dp)
+                                .padding(if (imageUrl != null && replyPayload == null) 4.dp else 12.dp)
                         ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (replyPayload != null) {
+                                    QuotedReplyBubbleBlock(
+                                        senderName = replyPayload.senderName,
+                                        snippet = replyPayload.snippet,
+                                        isMine = isMine,
+                                        onClick = {
+                                            val targetIdx = reversedMessages.indexOfFirst { it.id == replyPayload.replyToId }
+                                            if (targetIdx >= 0) {
+                                                threadScope.launch {
+                                                    if (reduceMotion) {
+                                                        listState.scrollToItem(targetIdx)
+                                                    } else {
+                                                        listState.animateScrollToItem(targetIdx)
+                                                    }
+                                                    highlightedMessageId = replyPayload.replyToId
+                                                    delay(650L)
+                                                    if (highlightedMessageId == replyPayload.replyToId) {
+                                                        highlightedMessageId = null
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
                             if (voicePayload != null) {
                                 val isPlaying = playingUrl == voicePayload.url
                                 VoiceMessageBubbleContent(
@@ -859,12 +1170,64 @@ fun ChatThreadScreen(
                                         .clip(RoundedCornerShape(14.dp))
                                         .clickable { previewImageUrl = imageUrl }
                                 )
+                            } else if (productPayload != null) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (isMine) Color.White.copy(alpha = 0.16f)
+                                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                                            )
+                                            .clickable { onProductClick(productPayload.productId) }
+                                            .padding(8.dp)
+                                    ) {
+                                        AsyncImage(
+                                            model = productPayload.imageUrl,
+                                            contentDescription = productPayload.title,
+                                            placeholder = painterResource(R.drawable.img_placeholder),
+                                            error = painterResource(R.drawable.img_placeholder),
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(44.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = productPayload.title,
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if (isMine) Color.White else tokens.textPrimary,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(
+                                                text = KartFormatters.formatCedis(productPayload.price),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isMine) Color.White.copy(alpha = 0.92f) else KartPrimary
+                                            )
+                                        }
+                                    }
+                                    if (productPayload.caption.isNotBlank()) {
+                                        Text(
+                                            text = productPayload.caption,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = if (isMine) Color.White else tokens.textPrimary
+                                        )
+                                    }
+                                }
                             } else {
                                 Text(
-                                    text = msg.content,
+                                    text = bodyContent,
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = if (isMine) Color.White else tokens.textPrimary
                                 )
+                            }
                             }
                         }
                         if (isLastInGroup && formattedTime.isNotBlank()) {
@@ -872,16 +1235,51 @@ fun ChatThreadScreen(
                             Text(
                                 text = formattedTime,
                                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                                color = tokens.textMuted
+                                color = tokens.textMuted,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 4.dp)
                             )
                         }
                     }
+                }
                 }
             }
         }
 
         // Floating Message Composer
         val easeOutStrong = remember { CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
+
+        AnimatedVisibility(
+            visible = isOtherTyping,
+            enter = if (reduceMotion) {
+                fadeIn(tween(150, easing = easeOutStrong))
+            } else {
+                fadeIn(tween(180, easing = easeOutStrong)) +
+                    expandVertically(
+                        expandFrom = Alignment.Bottom,
+                        animationSpec = tween(180, easing = easeOutStrong)
+                    )
+            },
+            exit = if (reduceMotion) {
+                fadeOut(tween(110, easing = easeOutStrong))
+            } else {
+                fadeOut(tween(130, easing = easeOutStrong)) +
+                    shrinkVertically(
+                        shrinkTowards = Alignment.Bottom,
+                        animationSpec = tween(130, easing = easeOutStrong)
+                    )
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        ) {
+            TypingIndicatorBubble(
+                senderName = conv?.otherUser?.resolvedName,
+                reduceMotion = reduceMotion
+            )
+        }
+
         val actionInteraction = remember { MutableInteractionSource() }
         val actionPressed by actionInteraction.collectIsPressedAsState()
         val actionScale by animateFloatAsState(
@@ -996,124 +1394,334 @@ fun ChatThreadScreen(
                             )
                         }
                     }
-                } else {
-                    val hasText = messageInput.isNotBlank()
+                } else if (isOtherBlocked) {
                     Row(
-                        verticalAlignment = Alignment.Bottom,
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .border(1.dp, tokens.cardBorder, RoundedCornerShape(18.dp))
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Text(
+                            text = "You blocked this user. Unblock to send messages.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = tokens.textSecondary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = "Unblock",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = KartPrimary,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onUnblockUser(otherUserId) {} }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                } else {
+                    val canSend = messageInput.isNotBlank() || attachedProduct != null
+                    val hasComposerBanner = attachedProduct != null || replyingTo != null
+                    val composerShape = RoundedCornerShape(if (hasComposerBanner) 22.dp else 28.dp)
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .shadow(
                                 elevation = 4.dp,
-                                shape = capsuleShape,
+                                shape = composerShape,
                                 ambientColor = Color.Black.copy(alpha = 0.10f),
                                 spotColor = Color.Black.copy(alpha = 0.14f)
                             )
-                            .clip(capsuleShape)
+                            .clip(composerShape)
                             .background(MaterialTheme.colorScheme.surface)
-                            .border(1.dp, tokens.cardBorder, capsuleShape)
-                            .padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
+                            .border(1.dp, tokens.cardBorder, composerShape)
                     ) {
-                        IconButton(
-                            onClick = {
-                                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        AnimatedVisibility(
+                            visible = replyingTo != null,
+                            enter = if (reduceMotion) {
+                                fadeIn(tween(150, easing = easeOutStrong))
+                            } else {
+                                fadeIn(tween(180, easing = easeOutStrong)) +
+                                    expandVertically(tween(180, easing = easeOutStrong))
                             },
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                            exit = if (reduceMotion) {
+                                fadeOut(tween(110, easing = easeOutStrong))
+                            } else {
+                                fadeOut(tween(130, easing = easeOutStrong)) +
+                                    shrinkVertically(tween(130, easing = easeOutStrong))
+                            }
                         ) {
-                            Icon(
-                                KartLucideIcons.Image,
-                                contentDescription = "Send photo",
-                                tint = tokens.textSecondary,
-                                modifier = Modifier.size(19.dp)
-                            )
+                            replyingTo?.let { draft ->
+                                Column {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(3.dp)
+                                                .height(32.dp)
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(KartPrimary)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Replying to ${draft.senderName}",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = KartPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = draft.snippet,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = tokens.textSecondary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { replyingTo = null },
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .testTag("chat_cancel_reply_btn")
+                                        ) {
+                                            Icon(
+                                                imageVector = KartLucideIcons.X,
+                                                contentDescription = "Cancel reply",
+                                                tint = tokens.textMuted,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    HorizontalDivider(color = tokens.cardBorder)
+                                }
+                            }
                         }
 
-                        Spacer(Modifier.width(10.dp))
+                        AnimatedVisibility(visible = attachedProduct != null) {
+                            attachedProduct?.let { product ->
+                                Column {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = 10.dp, end = 6.dp, top = 8.dp, bottom = 8.dp)
+                                    ) {
+                                        AsyncImage(
+                                            model = product.primaryImage,
+                                            contentDescription = product.title,
+                                            placeholder = painterResource(R.drawable.img_placeholder),
+                                            error = painterResource(R.drawable.img_placeholder),
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(44.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .clickable { onProductClick(product.id) }
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Column(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clickable { onProductClick(product.id) }
+                                        ) {
+                                            Text(
+                                                text = product.title,
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = tokens.textPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = KartFormatters.formatCedis(product.price),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = KartPrimary
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { viewModel.clearPendingProductAttachment(conversationId) },
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .testTag("chat_remove_product_btn")
+                                        ) {
+                                            Icon(
+                                                imageVector = KartLucideIcons.X,
+                                                contentDescription = "Remove attached item",
+                                                tint = tokens.textMuted,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    HorizontalDivider(color = tokens.cardBorder)
+                                }
+                            }
+                        }
 
-                        Box(
-                            contentAlignment = Alignment.CenterStart,
+                        Row(
+                            verticalAlignment = Alignment.Bottom,
                             modifier = Modifier
-                                .weight(1f)
-                                .padding(vertical = 10.dp)
+                                .fillMaxWidth()
+                                .padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
                         ) {
-                            if (messageInput.isEmpty()) {
-                                Text(
-                                    text = "Message...",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = tokens.textMuted
+                            IconButton(
+                                onClick = {
+                                    photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                Icon(
+                                    KartLucideIcons.Image,
+                                    contentDescription = "Send photo",
+                                    tint = tokens.textSecondary,
+                                    modifier = Modifier.size(19.dp)
                                 )
                             }
-                            BasicTextField(
-                                value = messageInput,
-                                onValueChange = { messageInput = it },
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                    color = tokens.textPrimary
-                                ),
-                                cursorBrush = SolidColor(KartPrimary),
-                                maxLines = 4,
+
+                            Spacer(Modifier.width(10.dp))
+
+                            Box(
+                                contentAlignment = Alignment.CenterStart,
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("chat_message_input")
-                            )
-                        }
-
-                        Spacer(Modifier.width(6.dp))
-
-                        IconButton(
-                            enabled = !state.sending,
-                            interactionSource = actionInteraction,
-                            onClick = {
-                                if (hasText) {
-                                    val toSend = messageInput.trim()
-                                    messageInput = ""
-                                    viewModel.sendMessage(conversationId, currentUserId, toSend)
-                                } else {
-                                    val granted = ContextCompat.checkSelfPermission(
-                                        context,
-                                        Manifest.permission.RECORD_AUDIO
-                                    ) == PackageManager.PERMISSION_GRANTED
-                                    if (granted) startRecording()
-                                    else audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    .weight(1f)
+                                    .padding(vertical = 10.dp)
+                            ) {
+                                if (messageInput.isEmpty()) {
+                                    Text(
+                                        text = if (attachedProduct != null) "Add a message about this item..." else "Message...",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = tokens.textMuted
+                                    )
                                 }
-                            },
-                            modifier = Modifier
-                                .size(40.dp)
-                                .graphicsLayer {
-                                    scaleX = actionScale
-                                    scaleY = actionScale
-                                }
-                                .clip(CircleShape)
-                                .background(KartPrimary)
-                                .testTag(if (hasText) "chat_send_btn" else "chat_mic_btn")
-                        ) {
-                            AnimatedContent(
-                                targetState = hasText,
-                                transitionSpec = {
-                                    (fadeIn(tween(150, easing = easeOutStrong)) +
-                                        scaleIn(initialScale = 0.84f, animationSpec = tween(150, easing = easeOutStrong)))
-                                        .togetherWith(
-                                            fadeOut(tween(110, easing = easeOutStrong)) +
-                                                scaleOut(targetScale = 0.84f, animationSpec = tween(110, easing = easeOutStrong))
+                                BasicTextField(
+                                    value = messageInput,
+                                    onValueChange = {
+                                        messageInput = it
+                                        viewModel.onTypingInputChanged(conversationId, currentUserId, it)
+                                    },
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                        color = tokens.textPrimary
+                                    ),
+                                    cursorBrush = SolidColor(KartPrimary),
+                                    maxLines = 4,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("chat_message_input")
+                                )
+                            }
+
+                            Spacer(Modifier.width(6.dp))
+
+                            IconButton(
+                                enabled = !state.sending,
+                                interactionSource = actionInteraction,
+                                onClick = {
+                                    if (attachedProduct != null) {
+                                        val caption = messageInput.trim()
+                                        val prevReply = replyingTo
+                                        messageInput = ""
+                                        replyingTo = null
+                                        viewModel.stopTyping(conversationId, currentUserId)
+                                        viewModel.sendProductMessage(
+                                            conversationId = conversationId,
+                                            senderId = currentUserId,
+                                            product = attachedProduct,
+                                            caption = caption,
+                                            onFailure = {
+                                                if (messageInput.isBlank() && caption.isNotBlank()) {
+                                                    messageInput = caption
+                                                }
+                                                if (replyingTo == null && prevReply != null) {
+                                                    replyingTo = prevReply
+                                                }
+                                            }
                                         )
+                                    } else if (messageInput.isNotBlank()) {
+                                        val toSend = messageInput.trim()
+                                        val activeReply = replyingTo
+                                        messageInput = ""
+                                        replyingTo = null
+                                        viewModel.stopTyping(conversationId, currentUserId)
+                                        val restoreDraft: () -> Unit = {
+                                            if (messageInput.isBlank()) messageInput = toSend
+                                            if (replyingTo == null && activeReply != null) replyingTo = activeReply
+                                        }
+                                        if (activeReply != null) {
+                                            viewModel.sendReplyMessage(
+                                                conversationId = conversationId,
+                                                senderId = currentUserId,
+                                                replyToId = activeReply.messageId,
+                                                replySenderName = activeReply.senderName,
+                                                replySnippet = activeReply.snippet,
+                                                text = toSend,
+                                                onFailure = restoreDraft
+                                            )
+                                        } else {
+                                            viewModel.sendMessage(
+                                                conversationId = conversationId,
+                                                senderId = currentUserId,
+                                                text = toSend,
+                                                onFailure = restoreDraft
+                                            )
+                                        }
+                                    } else {
+                                        val granted = ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.RECORD_AUDIO
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                        if (granted) startRecording()
+                                        else audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
                                 },
-                                label = "composerActionIcon"
-                            ) { showSend ->
-                                if (showSend) {
-                                    Icon(
-                                        KartLucideIcons.Send,
-                                        contentDescription = "Send message",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                } else {
-                                    Icon(
-                                        VoiceMicIcon,
-                                        contentDescription = "Record voice message",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(19.dp)
-                                    )
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .graphicsLayer {
+                                        scaleX = actionScale
+                                        scaleY = actionScale
+                                    }
+                                    .clip(CircleShape)
+                                    .background(KartPrimary)
+                                    .testTag(if (canSend) "chat_send_btn" else "chat_mic_btn")
+                            ) {
+                                AnimatedContent(
+                                    targetState = canSend,
+                                    transitionSpec = {
+                                        (fadeIn(tween(150, easing = easeOutStrong)) +
+                                            scaleIn(initialScale = 0.84f, animationSpec = tween(150, easing = easeOutStrong)))
+                                            .togetherWith(
+                                                fadeOut(tween(110, easing = easeOutStrong)) +
+                                                    scaleOut(targetScale = 0.84f, animationSpec = tween(110, easing = easeOutStrong))
+                                            )
+                                    },
+                                    label = "composerActionIcon"
+                                ) { showSend ->
+                                    if (showSend) {
+                                        Icon(
+                                            KartLucideIcons.Send,
+                                            contentDescription = "Send message",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            VoiceMicIcon,
+                                            contentDescription = "Record voice message",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(19.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1121,6 +1729,29 @@ fun ChatThreadScreen(
                 }
             }
         }
+    }
+
+    if (showBlockDialog && otherUserId.isNotBlank()) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showBlockDialog = false },
+            title = { Text("Block ${conv?.otherUser?.resolvedName ?: "User"}?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("Blocked users can no longer message you, follow you, or send you chat push notifications. You can unblock them anytime in Settings.")
+            },
+            confirmButton = {
+                com.example.ui.components.KartPrimaryButton(
+                    text = "Block User",
+                    containerColor = KartDanger,
+                    onClick = {
+                        showBlockDialog = false
+                        onBlockUser(otherUserId) {}
+                    }
+                )
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showBlockDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 
     if (showReportDialog && !conv?.otherUser?.id.isNullOrBlank()) {
@@ -1445,4 +2076,219 @@ private val VoicePauseIcon: ImageVector by lazy {
             close()
         }
     }.build()
+}
+
+private data class ReplyDraft(
+    val messageId: String,
+    val senderName: String,
+    val snippet: String
+)
+
+@Composable
+private fun QuotedReplyBubbleBlock(
+    senderName: String,
+    snippet: String,
+    isMine: Boolean,
+    onClick: () -> Unit
+) {
+    val tokens = KartThemeTokens.colors
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                if (isMine) Color.White.copy(alpha = 0.16f)
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(28.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(if (isMine) Color.White.copy(alpha = 0.88f) else KartPrimary)
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = senderName,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = if (isMine) Color.White else KartPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = snippet,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isMine) Color.White.copy(alpha = 0.86f) else tokens.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+private val ReplyArrowIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "ReplyArrow",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            stroke = SolidColor(Color.White),
+            strokeLineWidth = 2f,
+            strokeLineCap = StrokeCap.Round
+        ) {
+            moveTo(9f, 17f)
+            lineTo(4f, 12f)
+            lineTo(9f, 7f)
+            moveTo(20f, 18f)
+            verticalLineTo(16f)
+            curveTo(20f, 13.79f, 18.21f, 12f, 16f, 12f)
+            horizontalLineTo(4f)
+        }
+    }.build()
+}
+
+@Composable
+private fun OnlineDotBadge(
+    visible: Boolean,
+    borderColor: Color,
+    dotSize: Dp = 13.dp,
+    reduceMotion: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val easeOutStrong = remember { CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(180, easing = easeOutStrong)) +
+            if (reduceMotion) EnterTransition.None
+            else scaleIn(initialScale = 0.90f, animationSpec = tween(180, easing = easeOutStrong)),
+        exit = fadeOut(tween(140, easing = easeOutStrong)) +
+            if (reduceMotion) ExitTransition.None
+            else scaleOut(targetScale = 0.90f, animationSpec = tween(140, easing = easeOutStrong)),
+        modifier = modifier
+    ) {
+        Box(
+            modifier = Modifier
+                .size(dotSize)
+                .clip(CircleShape)
+                .background(borderColor)
+                .padding(2.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .background(KartSuccess)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TypingIndicatorBubble(
+    senderName: String? = null,
+    reduceMotion: Boolean
+) {
+    val tokens = KartThemeTokens.colors
+    val density = LocalDensity.current
+    val easeOutStrong = remember { CubicBezierEasing(0.23f, 1f, 0.32f, 1f) }
+    val easeInOutStrong = remember { CubicBezierEasing(0.77f, 0f, 0.175f, 1f) }
+    val enterProgress = remember { Animatable(if (reduceMotion) 1f else 0f) }
+    LaunchedEffect(Unit) {
+        if (enterProgress.value < 1f) {
+            enterProgress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 180, easing = easeOutStrong)
+            )
+        }
+    }
+    val infiniteTransition = rememberInfiniteTransition(label = "typingDots")
+    val dotPhases = List(3) { idx ->
+        infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 480, easing = easeInOutStrong),
+                repeatMode = RepeatMode.Reverse,
+                initialStartOffset = StartOffset(idx * 120)
+            ),
+            label = "typingDot_$idx"
+        )
+    }
+    val liftPx = with(density) { 3.5.dp.toPx() }
+    val bubbleShape = RoundedCornerShape(
+        topStart = 18.dp,
+        topEnd = 18.dp,
+        bottomEnd = 18.dp,
+        bottomStart = 4.dp
+    )
+    val firstName = senderName?.trim()?.substringBefore(" ")?.takeIf { it.isNotBlank() }
+
+    Box(
+        contentAlignment = Alignment.CenterStart,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .graphicsLayer {
+                val p = enterProgress.value
+                alpha = p
+                if (!reduceMotion) {
+                    val s = 0.92f + 0.08f * p
+                    scaleX = s
+                    scaleY = s
+                }
+            }
+    ) {
+        Surface(
+            shape = bubbleShape,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, tokens.cardBorder)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    dotPhases.forEach { phaseState ->
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .graphicsLayer {
+                                    val phase = phaseState.value
+                                    alpha = if (reduceMotion) {
+                                        0.55f + 0.4f * phase
+                                    } else {
+                                        0.45f + 0.55f * phase
+                                    }
+                                    if (!reduceMotion) {
+                                        translationY = -liftPx * phase
+                                    }
+                                }
+                                .clip(CircleShape)
+                                .background(tokens.textSecondary)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = if (firstName != null) "$firstName is typing" else "Typing...",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tokens.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
 }

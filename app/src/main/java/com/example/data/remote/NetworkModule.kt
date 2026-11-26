@@ -68,18 +68,25 @@ class KartAppContainer(context: Context) {
         return exp <= (System.currentTimeMillis() / 1000L) + leewaySeconds
     }
 
-    private fun refreshSessionLocked(staleSession: UserSession): UserSession? {
-        if (!hasValidSupabaseKey || staleSession.refreshToken.isBlank()) return null
+    private sealed interface RefreshResult {
+        data class Success(val session: UserSession) : RefreshResult
+        data object AuthRejected : RefreshResult
+        data object TransientFailure : RefreshResult
+    }
+
+    private fun refreshSessionLocked(staleSession: UserSession): RefreshResult {
+        if (!hasValidSupabaseKey) return RefreshResult.TransientFailure
+        if (staleSession.refreshToken.isBlank()) return RefreshResult.AuthRejected
         return synchronized(refreshLock) {
             val latest = runBlocking { sessionStore.currentSession() }
             if (latest.isLoggedIn &&
                 latest.accessToken != staleSession.accessToken &&
                 !isJwtExpiredOrExpiringSoon(latest.accessToken)
             ) {
-                return@synchronized latest
+                return@synchronized RefreshResult.Success(latest)
             }
             val refreshToken = latest.refreshToken.ifBlank { staleSession.refreshToken }
-            if (refreshToken.isBlank()) return@synchronized null
+            if (refreshToken.isBlank()) return@synchronized RefreshResult.AuthRejected
 
             try {
                 val url = BuildConfig.SUPABASE_URL.trimEnd('/') + "/auth/v1/token?grant_type=refresh_token"
@@ -93,12 +100,18 @@ class KartAppContainer(context: Context) {
                     .build()
 
                 bareHttpClient.newCall(req).execute().use { res ->
-                    if (!res.isSuccessful) return@synchronized null
+                    if (!res.isSuccessful) {
+                        return@synchronized if (res.code in setOf(400, 401, 403)) {
+                            RefreshResult.AuthRejected
+                        } else {
+                            RefreshResult.TransientFailure
+                        }
+                    }
                     val raw = res.body?.string().orEmpty()
-                    if (raw.isBlank()) return@synchronized null
+                    if (raw.isBlank()) return@synchronized RefreshResult.TransientFailure
                     val json = JSONObject(raw)
                     val newAccess = json.optString("access_token", "")
-                    if (newAccess.isBlank()) return@synchronized null
+                    if (newAccess.isBlank()) return@synchronized RefreshResult.TransientFailure
                     val newRefresh = json.optString("refresh_token", "").ifBlank { refreshToken }
                     val userObj = json.optJSONObject("user")
                     val updated = UserSession(
@@ -108,10 +121,10 @@ class KartAppContainer(context: Context) {
                         email = userObj?.optString("email", "").orEmpty().ifBlank { latest.email }
                     )
                     runBlocking { sessionStore.saveSession(updated) }
-                    updated
+                    RefreshResult.Success(updated)
                 }
             } catch (_: Exception) {
-                null
+                RefreshResult.TransientFailure
             }
         }
     }
@@ -119,12 +132,18 @@ class KartAppContainer(context: Context) {
     private fun resolveFreshSession(): UserSession {
         val current = runBlocking { sessionStore.currentSession() }
         if (current.isLoggedIn && isJwtExpiredOrExpiringSoon(current.accessToken)) {
-            val refreshed = refreshSessionLocked(current)
-            if (refreshed != null) return refreshed
-            // If access token is already past expiry and refresh failed, clear stale session
-            if (isJwtExpiredOrExpiringSoon(current.accessToken, leewaySeconds = 0L)) {
-                runBlocking { sessionStore.clearSession() }
-                return UserSession()
+            when (val result = refreshSessionLocked(current)) {
+                is RefreshResult.Success -> return result.session
+                RefreshResult.AuthRejected -> {
+                    // Only clear session when the auth server definitively rejects the refresh token
+                    if (isJwtExpiredOrExpiringSoon(current.accessToken, leewaySeconds = 0L)) {
+                        runBlocking { sessionStore.clearSession() }
+                        return UserSession()
+                    }
+                }
+                RefreshResult.TransientFailure -> {
+                    // Keep existing session intact during offline / transient network errors
+                }
             }
         }
         return current
@@ -163,14 +182,18 @@ class KartAppContainer(context: Context) {
         val path = original.url.encodedPath
         val isPublicAuthEndpoint = path.startsWith("/auth/v1/token") ||
             path.startsWith("/auth/v1/signup") ||
-            path.startsWith("/auth/v1/recover")
-        val session = if (isPublicAuthEndpoint) UserSession() else resolveFreshSession()
+            path.startsWith("/auth/v1/recover") ||
+            path.startsWith("/auth/v1/verify")
+        val hasExplicitAuth = !original.header("Authorization").isNullOrBlank()
+        val session = if (isPublicAuthEndpoint || hasExplicitAuth) UserSession() else resolveFreshSession()
         val builder = original.newBuilder()
             .header("Accept", "application/json")
         if (hasValidSupabaseKey) {
             builder.header("apikey", supabaseAnonKey)
-            val bearer = session.accessToken.takeIf { it.isNotBlank() } ?: supabaseAnonKey
-            builder.header("Authorization", "Bearer $bearer")
+            if (!hasExplicitAuth) {
+                val bearer = session.accessToken.takeIf { it.isNotBlank() } ?: supabaseAnonKey
+                builder.header("Authorization", "Bearer $bearer")
+            }
         }
         chain.proceed(builder.build())
     }
@@ -195,9 +218,31 @@ class KartAppContainer(context: Context) {
     private fun createTokenRefreshAuthenticator(isKartWeb: Boolean) = object : Authenticator {
         override fun authenticate(route: Route?, response: Response): Request? {
             if (response.request.header("X-Kart-Auth-Retried") != null) return null
+            if (!isKartWeb) {
+                val path = response.request.url.encodedPath
+                val isPublicAuthEndpoint = path.startsWith("/auth/v1/token") ||
+                    path.startsWith("/auth/v1/signup") ||
+                    path.startsWith("/auth/v1/recover") ||
+                    path.startsWith("/auth/v1/verify")
+                if (isPublicAuthEndpoint) return null
+            }
             val current = runBlocking { sessionStore.currentSession() }
             if (!current.isLoggedIn || current.refreshToken.isBlank()) return null
-            val refreshed = refreshSessionLocked(current) ?: return null
+            if (!isKartWeb) {
+                val reqAuth = response.request.header("Authorization")
+                if (!reqAuth.isNullOrBlank() && reqAuth != "Bearer ${current.accessToken}") {
+                    // Request used an explicit token (e.g. password recovery token), do not swap in user's session
+                    return null
+                }
+            }
+            val refreshed = when (val result = refreshSessionLocked(current)) {
+                is RefreshResult.Success -> result.session
+                is RefreshResult.AuthRejected -> {
+                    runBlocking { sessionStore.clearSession() }
+                    return null
+                }
+                is RefreshResult.TransientFailure -> return null
+            }
             val builder = response.request.newBuilder()
                 .header("X-Kart-Auth-Retried", "1")
             if (isKartWeb) {

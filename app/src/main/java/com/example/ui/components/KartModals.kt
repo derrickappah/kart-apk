@@ -17,6 +17,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,23 +39,33 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.KartReviewTags
 import com.example.domain.model.Profile
+import com.example.ui.theme.KartDanger
+import com.example.ui.theme.KartDangerContainer
 import com.example.ui.theme.KartPrimary
+import com.example.ui.theme.KartSuccess
+import com.example.ui.theme.KartSuccessContainer
 import com.example.ui.theme.KartThemeTokens
 import com.example.ui.theme.KartWarning
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DeliveryVerificationDialog(
     onDismiss: () -> Unit,
     onSendOtp: () -> Unit,
     onConfirm: (code: String, mode: String) -> Unit,
-    isSubmitting: Boolean
+    isSubmitting: Boolean,
+    isSendingOtp: Boolean = false,
+    otpSent: Boolean = false,
+    errorMessage: String? = null,
+    statusMessage: String? = null,
+    onClearStatus: () -> Unit = {},
+    onOpenQrScanner: (() -> Unit)? = null
 ) {
-    var mode by remember { mutableStateOf("pin") }
+    var mode by remember { mutableStateOf(if (onOpenQrScanner != null) "qr" else "pin") }
     var code by remember { mutableStateOf("") }
-    var otpSent by remember { mutableStateOf(false) }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSubmitting && !isSendingOtp) onDismiss() },
         shape = RoundedCornerShape(20.dp),
         title = {
             Text(
@@ -69,49 +81,107 @@ fun DeliveryVerificationDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = KartThemeTokens.colors.textSecondary
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (onOpenQrScanner != null) {
+                        KartChip(
+                            label = "Scan QR",
+                            selected = mode == "qr",
+                            onClick = { mode = "qr"; code = ""; onClearStatus() }
+                        )
+                    }
                     KartChip(
                         label = "Delivery PIN",
                         selected = mode == "pin",
-                        onClick = { mode = "pin"; code = "" }
+                        onClick = { mode = "pin"; code = ""; onClearStatus() }
                     )
                     KartChip(
                         label = "One-Time OTP",
                         selected = mode == "otp",
-                        onClick = { mode = "otp"; code = "" }
+                        onClick = { mode = "otp"; code = ""; onClearStatus() }
                     )
                 }
-                if (mode == "otp") {
-                    KartOutlineButton(
-                        text = if (otpSent) "Resend Delivery OTP" else "Send Delivery OTP",
-                        onClick = {
-                            otpSent = true
-                            onSendOtp()
-                        },
+                if (!errorMessage.isNullOrBlank()) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = KartDangerContainer),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = errorMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = KartDanger,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                } else if (!statusMessage.isNullOrBlank()) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = KartSuccessContainer),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = statusMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = KartSuccess,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+                if (mode == "qr" && onOpenQrScanner != null) {
+                    Text(
+                        text = "Ask the seller to open this order and show their Handover QR Code, then scan it below.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = KartThemeTokens.colors.textSecondary
+                    )
+                    KartPrimaryButton(
+                        text = "Open QR Scanner",
+                        icon = KartLucideIcons.QrCode,
+                        enabled = !isSubmitting,
+                        onClick = onOpenQrScanner,
                         modifier = Modifier.fillMaxWidth()
                     )
+                } else {
+                    if (mode == "otp") {
+                        KartOutlineButton(
+                            text = when {
+                                isSendingOtp -> "Sending Delivery OTP..."
+                                otpSent -> "Resend Delivery OTP"
+                                else -> "Send Delivery OTP"
+                            },
+                            enabled = !isSendingOtp && !isSubmitting,
+                            onClick = onSendOtp,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    val requiredLen = 6
+                    KartTextField(
+                        value = code,
+                        onValueChange = {
+                            code = it.filter(Char::isDigit).take(requiredLen)
+                            if (errorMessage != null) onClearStatus()
+                        },
+                        label = if (mode == "pin") "6-Digit Delivery PIN" else "6-Digit Verification OTP",
+                        placeholder = if (mode == "pin") "••••••" else "123456",
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
                 }
-                val requiredLen = if (mode == "pin") 4 else 6
-                KartTextField(
-                    value = code,
-                    onValueChange = { code = it.filter(Char::isDigit).take(requiredLen) },
-                    label = if (mode == "pin") "4-Digit Delivery PIN" else "6-Digit Verification OTP",
-                    placeholder = if (mode == "pin") "••••" else "123456",
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
-                )
             }
         },
         confirmButton = {
-            val requiredLen = if (mode == "pin") 4 else 6
-            KartPrimaryButton(
-                text = "Release Escrow",
-                loading = isSubmitting,
-                enabled = code.length == requiredLen,
-                onClick = { onConfirm(code, mode) }
-            )
+            if (mode != "qr") {
+                KartPrimaryButton(
+                    text = "Release Escrow",
+                    loading = isSubmitting,
+                    enabled = code.length == 6 && !isSubmitting && !isSendingOtp,
+                    onClick = { onConfirm(code, mode) }
+                )
+            }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss, enabled = !isSubmitting && !isSendingOtp) { Text("Cancel") }
         }
     )
 }
@@ -163,14 +233,15 @@ fun RefundRequestDialog(
 fun ReportDialog(
     targetLabel: String,
     onDismiss: () -> Unit,
-    onSubmit: (reason: String, details: String) -> Unit
+    onSubmit: (reason: String, details: String) -> Unit,
+    isSubmitting: Boolean = false
 ) {
     val reasons = listOf("Scam / Fraud", "Counterfeit Item", "Inappropriate Content", "Harassment", "Wrong Category")
     var selectedReason by remember { mutableStateOf(reasons.first()) }
     var details by remember { mutableStateOf("") }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
         shape = RoundedCornerShape(20.dp),
         title = { Text("Report $targetLabel", fontWeight = FontWeight.Bold) },
         text = {
@@ -183,7 +254,7 @@ fun ReportDialog(
                         KartChip(
                             label = reason,
                             selected = selectedReason == reason,
-                            onClick = { selectedReason = reason }
+                            onClick = { if (!isSubmitting) selectedReason = reason }
                         )
                     }
                 }
@@ -200,11 +271,13 @@ fun ReportDialog(
         confirmButton = {
             KartPrimaryButton(
                 text = "Submit Report",
+                loading = isSubmitting,
+                enabled = !isSubmitting,
                 onClick = { onSubmit(selectedReason, details.trim()) }
             )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss, enabled = !isSubmitting) { Text("Cancel") }
         }
     )
 }
@@ -301,7 +374,8 @@ fun FollowersListSheet(
     title: String,
     users: List<Profile>,
     onUserClick: (String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    isLoading: Boolean = false
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -315,7 +389,13 @@ fun FollowersListSheet(
         ) {
             Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(14.dp))
-            if (users.isEmpty()) {
+            if (isLoading) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    repeat(3) {
+                        ShimmerBox(modifier = Modifier.fillMaxWidth().height(54.dp))
+                    }
+                }
+            } else if (users.isEmpty()) {
                 Text(
                     "No users to show yet.",
                     style = MaterialTheme.typography.bodyMedium,
