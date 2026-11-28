@@ -2,6 +2,7 @@ package com.example
 
 import com.example.data.repository.AdminDashboardBundle
 import com.example.domain.model.ActiveAdvertisementRow
+import com.example.domain.model.AdminOverviewStatsRpc
 import com.example.domain.model.CampusRow
 import com.example.domain.model.Order
 import com.example.domain.model.OrderProduct
@@ -163,5 +164,153 @@ class AdminConsoleHelpersTest {
             bundle
         ) as com.example.ui.screens.AdminDetailTarget.User
         assertEquals(true, resolved.profile.banned)
+    }
+
+    @Test
+    fun computeOverviewStats_prefersServerStatsWhenPresent() {
+        val bundle = AdminDashboardBundle(
+            users = listOf(adminUser),
+            products = listOf(activeProduct),
+            orders = emptyList(),
+            verifications = emptyList(),
+            withdrawals = emptyList(),
+            refunds = emptyList(),
+            reports = emptyList(),
+            reviews = emptyList(),
+            advertisements = emptyList(),
+            campuses = emptyList(),
+            serverStats = AdminOverviewStatsRpc(
+                totalUsers = 1_000_000,
+                bannedUsers = 120,
+                verifiedUsers = 420_000,
+                adminUsers = 18,
+                standardUsers = 579_880,
+                totalListings = 250_810,
+                activeListings = 250_000,
+                suspendedListings = 310,
+                soldListings = 500,
+                totalOrders = 85_000,
+                totalGmv = 9_500_000.50,
+                totalPlatformFees = 475_000.25,
+                pendingKyc = 42,
+                pendingWithdrawals = 15,
+                pendingRefunds = 7,
+                pendingDeletions = 4,
+                openReports = 19,
+                openProductReports = 11,
+                openUserReports = 8,
+                totalReviews = 64_000,
+                activeAds = 1_250
+            )
+        )
+        val stats = AdminConsoleHelpers.computeOverviewStats(bundle)
+        assertEquals(1_000_000, stats.totalUsers)
+        assertEquals(120, stats.bannedUsers)
+        assertEquals(420_000, stats.verifiedUsers)
+        assertEquals(18, stats.adminUsers)
+        assertEquals(579_880, stats.standardUsers)
+        assertEquals(250_810, stats.totalListings)
+        assertEquals(250_000, stats.activeListings)
+        assertEquals(310, stats.suspendedListings)
+        assertEquals(500, stats.soldListings)
+        assertEquals(85_000, stats.totalOrders)
+        assertEquals(9_500_000.50, stats.totalGmv, 0.01)
+        assertEquals(475_000.25, stats.totalPlatformFees, 0.01)
+        assertEquals(42, stats.pendingKyc)
+        assertEquals(15, stats.pendingWithdrawals)
+        assertEquals(7, stats.pendingRefunds)
+        assertEquals(4, stats.pendingDeletions)
+        assertEquals(19, stats.openReports)
+        assertEquals(11, stats.openProductReports)
+        assertEquals(8, stats.openUserReports)
+        assertEquals(64_000, stats.totalReviews)
+        assertEquals(1_250, stats.activeAds)
+    }
+
+    @Test
+    fun activeAdvertisementRow_resolvesCostAndIsoDurationDays() {
+        val liveAd = ActiveAdvertisementRow(
+            id = "ad-live",
+            adType = "Featured",
+            cost = 50.0,
+            price = 0.0,
+            startDate = "2026-10-01T10:00:00Z",
+            endDate = "2026-10-31T10:00:00Z"
+        )
+        assertEquals(50.0, liveAd.resolvedPrice, 0.01)
+        assertEquals(30, liveAd.resolvedDurationDays)
+
+        val legacyAd = ActiveAdvertisementRow(
+            id = "ad-legacy",
+            adType = "Boost",
+            cost = null,
+            price = 25.0,
+            durationDays = 7
+        )
+        assertEquals(25.0, legacyAd.resolvedPrice, 0.01)
+        assertEquals(7, legacyAd.resolvedDurationDays)
+    }
+
+    @Test
+    fun withdrawalRequestRow_formatsPayoutDetailsJsonAndFallsBack() {
+        val jsonbWithdrawal = WithdrawalRequestRow(
+            id = "w-json",
+            amount = 150.0,
+            payoutMethod = "MoMo",
+            payoutDetails = mapOf(
+                "network" to "MTN",
+                "momo_number" to "0241234567",
+                "account_name" to "Kwame Mensah",
+                "recipient_code" to "RCP_hidden"
+            )
+        )
+        assertEquals("MTN • 0241234567 • Kwame Mensah", jsonbWithdrawal.resolvedAccountSummary)
+
+        val legacyWithdrawal = WithdrawalRequestRow(
+            id = "w-legacy",
+            amount = 90.0,
+            accountDetails = "Telecel 0200001111"
+        )
+        assertEquals("Telecel 0200001111", legacyWithdrawal.resolvedAccountSummary)
+    }
+
+    @Test
+    fun shouldAttachSupabaseAuthHeaders_restrictsToAuthenticatedSupabasePathsOnly() {
+        val supabaseBase = "https://ldenazbzeidskjbqjxwe.supabase.co"
+        assertEquals(
+            true,
+            AdminConsoleHelpers.shouldAttachSupabaseAuthHeaders(
+                "https://ldenazbzeidskjbqjxwe.supabase.co/storage/v1/object/authenticated/verifications/u1/id.jpg",
+                supabaseBase
+            )
+        )
+        assertEquals(
+            false,
+            AdminConsoleHelpers.shouldAttachSupabaseAuthHeaders(
+                "https://cdn.kart.cx/verifications/u1/id.jpg",
+                supabaseBase
+            )
+        )
+        assertEquals(
+            false,
+            AdminConsoleHelpers.shouldAttachSupabaseAuthHeaders(
+                "https://acct.r2.cloudflarestorage.com/verifications/u1/id.jpg?X-Amz-Signature=abc123",
+                supabaseBase
+            )
+        )
+        assertEquals(
+            false,
+            AdminConsoleHelpers.shouldAttachSupabaseAuthHeaders(
+                "https://ldenazbzeidskjbqjxwe.supabase.co/storage/v1/object/sign/verifications/u1/id.jpg?token=xyz",
+                supabaseBase
+            )
+        )
+        assertEquals(
+            false,
+            AdminConsoleHelpers.shouldAttachSupabaseAuthHeaders(
+                "https://ldenazbzeidskjbqjxwe.supabase.co/storage/v1/object/public/products/p1.jpg",
+                supabaseBase
+            )
+        )
     }
 }

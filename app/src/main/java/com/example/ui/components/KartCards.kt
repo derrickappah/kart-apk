@@ -44,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -106,8 +107,13 @@ fun KartProductCard(
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .border(1.dp, tokens.cardBorder, RoundedCornerShape(12.dp))
         ) {
+            val cardImageModel = remember(product.primaryImage) {
+                product.primaryImage
+                    ?.let { KartFormatters.buildOptimizedImageUrl(it, KartFormatters.ImageVariant.CARD) }
+                    ?.ifBlank { null }
+            }
             AsyncImage(
-                model = product.primaryImage,
+                model = cardImageModel,
                 contentDescription = product.title,
                 placeholder = painterResource(R.drawable.img_placeholder),
                 error = painterResource(R.drawable.img_placeholder),
@@ -304,6 +310,34 @@ fun KartCategoryTile(
     }
 }
 
+internal const val HERO_INFINITE_VIRTUAL_PAGE_COUNT = 100_000
+
+internal fun heroStartPage(itemCount: Int): Int {
+    if (itemCount <= 1) return 0
+    val mid = HERO_INFINITE_VIRTUAL_PAGE_COUNT / 2
+    return mid - (mid % itemCount)
+}
+
+internal fun heroActualIndex(virtualPage: Int, itemCount: Int): Int {
+    if (itemCount <= 0) return 0
+    return virtualPage.mod(itemCount)
+}
+
+internal fun heroShortestTargetPage(
+    currentPage: Int,
+    targetIndex: Int,
+    itemCount: Int,
+    virtualPageCount: Int
+): Int {
+    if (itemCount <= 1 || virtualPageCount <= 1) return 0
+    val safeTarget = targetIndex.mod(itemCount)
+    val currentIdx = currentPage.mod(itemCount)
+    val forwardDelta = (safeTarget - currentIdx + itemCount) % itemCount
+    val backwardDelta = forwardDelta - itemCount
+    val shortestDelta = if (forwardDelta <= -backwardDelta) forwardDelta else backwardDelta
+    return (currentPage + shortestDelta).coerceIn(0, virtualPageCount - 1)
+}
+
 @Composable
 fun PromotedBannerCarousel(
     products: List<Product>,
@@ -380,7 +414,10 @@ fun PromotedBannerCarousel(
         return
     }
 
-    val pagerState = rememberPagerState(pageCount = { products.size })
+    val count = products.size
+    val isInfinite = count > 1
+    val virtualPageCount = if (isInfinite) HERO_INFINITE_VIRTUAL_PAGE_COUNT else count
+    val startPage = heroStartPage(count)
     val scope = rememberCoroutineScope()
     val infiniteTransition = rememberInfiniteTransition(label = "arrowNudge")
     val arrowOffset by infiniteTransition.animateFloat(
@@ -393,29 +430,45 @@ fun PromotedBannerCarousel(
         label = "nudgeX"
     )
 
-    // Auto-advance every 4.5s matching PromotedBanner.js, pausing while user drags
-    LaunchedEffect(pagerState.currentPage, pagerState.isScrollInProgress, products) {
-        val active = products.getOrNull(pagerState.currentPage)
-        onAdView(active?.advertisementId)
-        if (products.size > 1 && !pagerState.isScrollInProgress) {
-            delay(4500L)
-            val next = (pagerState.currentPage + 1) % products.size
-            pagerState.animateScrollToPage(next)
-        }
-    }
+    key(count) {
+        val pagerState = rememberPagerState(
+            initialPage = startPage,
+            pageCount = { virtualPageCount }
+        )
 
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(420.dp)
-            .clipToBounds()
-            .background(KartHeroNavyDeep)
-    ) {
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.fillMaxSize()
-        ) { page ->
-            val item = products[page]
+        // Auto-advance every 4.5s matching PromotedBanner.js, pausing while user drags
+        LaunchedEffect(pagerState.currentPage, pagerState.isScrollInProgress, products) {
+            val activeIndex = heroActualIndex(pagerState.currentPage, count)
+            val active = products.getOrNull(activeIndex)
+            onAdView(active?.advertisementId)
+            if (isInfinite && !pagerState.isScrollInProgress) {
+                if (pagerState.currentPage <= count || pagerState.currentPage >= virtualPageCount - count - 1) {
+                    pagerState.scrollToPage(startPage + activeIndex)
+                }
+                delay(4500L)
+                val nextPage = pagerState.currentPage + 1
+                if (nextPage < virtualPageCount) {
+                    pagerState.animateScrollToPage(nextPage)
+                } else {
+                    pagerState.scrollToPage(startPage)
+                }
+            }
+        }
+
+        Box(
+            modifier = modifier
+                .fillMaxWidth()
+                .height(420.dp)
+                .clipToBounds()
+                .background(KartHeroNavyDeep)
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                beyondViewportPageCount = 1,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                val actualIndex = heroActualIndex(page, count)
+                val item = products[actualIndex]
             val isCurrent = pagerState.currentPage == page
             val imageScale by animateFloatAsState(
                 targetValue = if (isCurrent) 1.05f else 1f,
@@ -433,8 +486,13 @@ fun PromotedBannerCarousel(
                     .clickable { onProductClick(item) }
                     .testTag("hero_slide_${item.id}")
             ) {
+                val bannerImageModel = remember(item.primaryImage) {
+                    item.primaryImage
+                        ?.let { KartFormatters.buildOptimizedImageUrl(it, KartFormatters.ImageVariant.DETAIL) }
+                        ?.ifBlank { null }
+                }
                 AsyncImage(
-                    model = item.primaryImage,
+                    model = bannerImageModel,
                     contentDescription = item.title,
                     placeholder = painterResource(R.drawable.img_placeholder),
                     error = painterResource(R.drawable.img_placeholder),
@@ -561,7 +619,8 @@ fun PromotedBannerCarousel(
         }
 
         // Centered dot-to-pill slide indicators matching PromotedBanner.js (bottom-2.5, h-1.5, active w-6)
-        if (products.size > 1) {
+        if (count > 1) {
+            val currentActualIndex = heroActualIndex(pagerState.currentPage, count)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -570,8 +629,8 @@ fun PromotedBannerCarousel(
                     .padding(bottom = 10.dp)
                     .testTag("hero_carousel_indicators")
             ) {
-                repeat(products.size) { index ->
-                    val isSelected = pagerState.currentPage == index
+                repeat(count) { index ->
+                    val isSelected = currentActualIndex == index
                     val indicatorWidth by animateDpAsState(
                         targetValue = if (isSelected) 24.dp else 6.dp,
                         animationSpec = tween(durationMillis = 300),
@@ -589,12 +648,19 @@ fun PromotedBannerCarousel(
                             .clip(CircleShape)
                             .background(indicatorColor)
                             .clickable {
-                                scope.launch { pagerState.animateScrollToPage(index) }
+                                val targetPage = heroShortestTargetPage(
+                                    currentPage = pagerState.currentPage,
+                                    targetIndex = index,
+                                    itemCount = count,
+                                    virtualPageCount = virtualPageCount
+                                )
+                                scope.launch { pagerState.animateScrollToPage(targetPage) }
                             }
                             .testTag("hero_indicator_$index")
                     )
                 }
             }
+        }
         }
     }
 }
@@ -683,9 +749,11 @@ fun UserAvatar(
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
                 ?.let { url ->
-                    if (url.contains("api.dicebear.com")) {
+                    val normalized = if (url.contains("api.dicebear.com")) {
                         url.replace("/svg?", "/png?").replace(Regex("/svg$"), "/png")
                     } else url
+                    KartFormatters.buildOptimizedImageUrl(normalized, KartFormatters.ImageVariant.AVATAR)
+                        .ifBlank { null }
                 }
             if (resolvedAvatarUrl != null) {
                 AsyncImage(

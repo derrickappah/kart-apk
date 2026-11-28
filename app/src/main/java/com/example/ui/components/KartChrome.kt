@@ -1,11 +1,20 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
@@ -20,15 +29,22 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,14 +63,17 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -62,19 +81,29 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.domain.model.KartCategories
 import com.example.domain.model.KartConditionOptions
+import com.example.domain.model.KartFormatters
 import com.example.domain.model.KartGhanaCampuses
 import com.example.domain.model.KartSortOptions
 import com.example.domain.model.MarketplaceFilter
+import com.example.ui.theme.KartConnectivityOfflineDark
+import com.example.ui.theme.KartConnectivityOfflineLight
+import com.example.ui.theme.KartConnectivityOnline
 import com.example.ui.theme.KartDanger
 import com.example.ui.theme.KartPrimary
 import com.example.ui.theme.KartThemeTokens
+import kotlinx.coroutines.delay
 
 data class BottomTabItem(
     val route: String,
@@ -310,18 +339,174 @@ fun KartSubScreenTopBar(
     }
 }
 
+enum class ConnectivityBannerState {
+    HIDDEN,
+    OFFLINE,
+    BACK_ONLINE
+}
+
+@Composable
+fun rememberConnectivityBannerState(
+    isOnline: Boolean,
+    backOnlineDurationMs: Long = 2_500L
+): ConnectivityBannerState {
+    var hasBeenOffline by rememberSaveable { mutableStateOf(!isOnline) }
+    var bannerState by rememberSaveable {
+        mutableStateOf(
+            if (isOnline) ConnectivityBannerState.HIDDEN else ConnectivityBannerState.OFFLINE
+        )
+    }
+
+    LaunchedEffect(isOnline) {
+        if (!isOnline) {
+            hasBeenOffline = true
+            bannerState = ConnectivityBannerState.OFFLINE
+        } else if (hasBeenOffline) {
+            bannerState = ConnectivityBannerState.BACK_ONLINE
+            delay(backOnlineDurationMs)
+            hasBeenOffline = false
+            bannerState = ConnectivityBannerState.HIDDEN
+        } else {
+            bannerState = ConnectivityBannerState.HIDDEN
+        }
+    }
+
+    return bannerState
+}
+
+@Composable
+fun KartBottomChromeDock(
+    showBottomBar: Boolean,
+    currentRoute: String,
+    unreadMessages: Int,
+    onTabSelected: (String) -> Unit,
+    bannerState: ConnectivityBannerState,
+    bannerVisibilityState: MutableTransitionState<Boolean>,
+    modifier: Modifier = Modifier
+) {
+    val tokens = KartThemeTokens.colors
+    var lastVisibleState by remember {
+        mutableStateOf(
+            if (bannerState != ConnectivityBannerState.HIDDEN) bannerState
+            else ConnectivityBannerState.OFFLINE
+        )
+    }
+    if (bannerState != ConnectivityBannerState.HIDDEN) {
+        lastVisibleState = bannerState
+    }
+
+    val offlineBgColor = if (tokens.isDark) KartConnectivityOfflineDark else KartConnectivityOfflineLight
+    val displayedTargetColor = when (lastVisibleState) {
+        ConnectivityBannerState.BACK_ONLINE -> KartConnectivityOnline
+        ConnectivityBannerState.OFFLINE,
+        ConnectivityBannerState.HIDDEN -> offlineBgColor
+    }
+    val displayedBgColor by animateColorAsState(
+        targetValue = displayedTargetColor,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "connectivityBannerBg"
+    )
+
+    val insetTargetColor = when (bannerState) {
+        ConnectivityBannerState.OFFLINE -> offlineBgColor
+        ConnectivityBannerState.BACK_ONLINE -> KartConnectivityOnline
+        ConnectivityBannerState.HIDDEN -> MaterialTheme.colorScheme.background
+    }
+    val bottomInsetColor by animateColorAsState(
+        targetValue = insetTargetColor,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "connectivityBottomInsetBg"
+    )
+
+    val isBannerComposed = bannerVisibilityState.currentState || bannerVisibilityState.targetState
+    val handlesNavBars = showBottomBar || isBannerComposed
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        if (showBottomBar) {
+            KartBottomNav(
+                currentRoute = currentRoute,
+                unreadMessages = unreadMessages,
+                onTabSelected = onTabSelected,
+                applyNavigationBarsPadding = false
+            )
+        }
+
+        AnimatedVisibility(
+            visibleState = bannerVisibilityState,
+            enter = expandVertically(
+                expandFrom = Alignment.Top,
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+            ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+            exit = shrinkVertically(
+                shrinkTowards = Alignment.Top,
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+            ) + fadeOut(animationSpec = tween(durationMillis = 150))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(displayedBgColor)
+                    .semantics { liveRegion = LiveRegionMode.Polite }
+                    .testTag("connectivity_status_banner")
+            ) {
+                if (tokens.isDark && lastVisibleState == ConnectivityBannerState.OFFLINE) {
+                    HorizontalDivider(color = tokens.cardBorder, thickness = 1.dp)
+                }
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 32.dp)
+                        .padding(horizontal = 16.dp, vertical = 7.dp)
+                ) {
+                    AnimatedContent(
+                        targetState = lastVisibleState,
+                        transitionSpec = {
+                            fadeIn(animationSpec = tween(durationMillis = 180)) togetherWith
+                                fadeOut(animationSpec = tween(durationMillis = 120))
+                        },
+                        label = "connectivityBannerText"
+                    ) { state ->
+                        Text(
+                            text = if (state == ConnectivityBannerState.BACK_ONLINE) "You're back online" else "You're offline",
+                            color = if (state == ConnectivityBannerState.BACK_ONLINE) Color.White else Color(0xFFF3F4F6),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
+        if (handlesNavBars) {
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(bottomInsetColor)
+                    .windowInsetsBottomHeight(WindowInsets.navigationBars)
+            )
+        }
+    }
+}
+
 @Composable
 fun KartBottomNav(
     currentRoute: String,
     unreadMessages: Int,
     onTabSelected: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    applyNavigationBarsPadding: Boolean = true
 ) {
     val tokens = KartThemeTokens.colors
     Surface(
-        color = MaterialTheme.colorScheme.background.copy(alpha = 0.98f),
+        color = MaterialTheme.colorScheme.background,
         tonalElevation = 0.dp,
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("kart_bottom_nav")
     ) {
         Column {
             HorizontalDivider(color = tokens.cardBorder, thickness = 1.dp)
@@ -330,7 +515,7 @@ fun KartBottomNav(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .navigationBarsPadding()
+                    .then(if (applyNavigationBarsPadding) Modifier.navigationBarsPadding() else Modifier)
                     .height(62.dp)
                     .padding(horizontal = 6.dp)
             ) {
@@ -456,7 +641,7 @@ fun KartNavigationRail(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun FilterBottomSheet(
     currentFilter: MarketplaceFilter,
@@ -466,6 +651,7 @@ fun FilterBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val tokens = KartThemeTokens.colors
+    val availableCampuses = campuses.ifEmpty { KartGhanaCampuses }
     var category by remember(currentFilter) { mutableStateOf(currentFilter.category) }
     var selectedConditions by remember(currentFilter) {
         mutableStateOf(
@@ -477,6 +663,21 @@ fun FilterBottomSheet(
         )
     }
     var campus by remember(currentFilter) { mutableStateOf(currentFilter.campus) }
+    var showCampusSuggestions by remember { mutableStateOf(false) }
+    val campusBringIntoViewRequester = remember { BringIntoViewRequester() }
+    val matchingCampuses = remember(campus, availableCampuses) {
+        val q = campus.trim()
+        if (q.isEmpty()) availableCampuses.take(5)
+        else availableCampuses.filter { c ->
+            c.contains(q, ignoreCase = true) ||
+                KartFormatters.abbreviateCampus(c).contains(q, ignoreCase = true)
+        }.take(6)
+    }
+    LaunchedEffect(showCampusSuggestions, matchingCampuses.size) {
+        if (showCampusSuggestions) {
+            campusBringIntoViewRequester.bringIntoView()
+        }
+    }
     var minPrice by remember(currentFilter) { mutableStateOf(currentFilter.minPrice) }
     var maxPrice by remember(currentFilter) { mutableStateOf(currentFilter.maxPrice) }
     var sort by remember(currentFilter) { mutableStateOf(currentFilter.sort) }
@@ -489,6 +690,7 @@ fun FilterBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
@@ -513,6 +715,7 @@ fun FilterBottomSheet(
                             category = ""
                             selectedConditions = emptySet()
                             campus = ""
+                            showCampusSuggestions = false
                             minPrice = ""
                             maxPrice = ""
                             sort = "newest"
@@ -630,19 +833,123 @@ fun FilterBottomSheet(
             }
 
             // Campus
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Campus", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    KartChip(label = "All Campuses", selected = campus.isBlank(), onClick = { campus = "" })
-                    campuses.take(10).forEach { camp ->
-                        KartChip(
-                            label = camp,
-                            selected = campus == camp,
-                            onClick = { campus = if (campus == camp) "" else camp }
+            val trimmedQuery = campus.trim()
+            val normalizedCustomCampus = trimmedQuery.uppercase(java.util.Locale.US)
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.bringIntoViewRequester(campusBringIntoViewRequester)
+            ) {
+                KartTextField(
+                    value = campus,
+                    onValueChange = {
+                        campus = it
+                        showCampusSuggestions = true
+                    },
+                    label = "Campus",
+                    placeholder = "Search or enter your campus...",
+                    leadingIcon = {
+                        Icon(
+                            imageVector = KartLucideIcons.Search,
+                            contentDescription = null,
+                            tint = tokens.textMuted,
+                            modifier = Modifier.size(16.dp)
                         )
+                    },
+                    trailingIcon = if (campus.isNotEmpty()) {
+                        {
+                            IconButton(
+                                onClick = {
+                                    campus = ""
+                                    showCampusSuggestions = true
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = KartLucideIcons.X,
+                                    contentDescription = "Clear campus",
+                                    tint = tokens.textMuted,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        }
+                    } else null,
+                    modifier = Modifier.onFocusChanged { focusState ->
+                        if (focusState.isFocused) {
+                            showCampusSuggestions = true
+                        }
+                    }
+                )
+                if (showCampusSuggestions) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(1.dp, tokens.cardBorder, RoundedCornerShape(14.dp))
+                    ) {
+                        if (matchingCampuses.isNotEmpty()) {
+                            matchingCampuses.forEachIndexed { idx, match ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            campus = match
+                                            showCampusSuggestions = false
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = KartLucideIcons.MapPin,
+                                        contentDescription = null,
+                                        tint = KartPrimary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = match,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = tokens.textPrimary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                if (idx < matchingCampuses.lastIndex) {
+                                    HorizontalDivider(color = tokens.cardBorder)
+                                }
+                            }
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        campus = normalizedCustomCampus
+                                        showCampusSuggestions = false
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = KartLucideIcons.Plus,
+                                    contentDescription = null,
+                                    tint = KartPrimary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "No matching campus found",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = tokens.textSecondary
+                                    )
+                                    Text(
+                                        text = "Use \"$normalizedCustomCampus\"",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = KartPrimary
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -661,11 +968,19 @@ fun FilterBottomSheet(
                     } else {
                         minPrice to maxPrice
                     }
+                    val trimmedCampus = campus.trim()
+                    val resolvedCampus = if (trimmedCampus.isEmpty()) {
+                        ""
+                    } else {
+                        availableCampuses.firstOrNull {
+                            it.equals(trimmedCampus, ignoreCase = true)
+                        } ?: trimmedCampus.uppercase(java.util.Locale.US)
+                    }
                     onApply(
                         currentFilter.copy(
                             category = category,
                             condition = orderedConditions,
-                            campus = campus,
+                            campus = resolvedCampus,
                             minPrice = resolvedMin,
                             maxPrice = resolvedMax,
                             sort = sort

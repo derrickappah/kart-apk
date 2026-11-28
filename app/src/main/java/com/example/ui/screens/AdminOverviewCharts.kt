@@ -189,15 +189,13 @@ fun AdminOverviewDashboard(
         )
 
         // Side-by-side Users & Listings Donut Charts
-        val standardUsers = (stats.totalUsers - stats.verifiedUsers - stats.bannedUsers).coerceAtLeast(0)
-        val soldListings = ((bundle?.products?.size ?: 0) - stats.activeListings - stats.suspendedListings).coerceAtLeast(0)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             AdminDonutChartCard(
                 title = "Users",
                 total = stats.totalUsers,
                 slices = listOf(
                     DonutSlice("Verified", stats.verifiedUsers, KartSuccess),
-                    DonutSlice("Standard", standardUsers, KartPrimary),
+                    DonutSlice("Standard", stats.standardUsers, KartPrimary),
                     DonutSlice("Banned", stats.bannedUsers, KartDanger)
                 ),
                 onClick = { onNavigateTab("Users", "All") },
@@ -205,11 +203,11 @@ fun AdminOverviewDashboard(
             )
             AdminDonutChartCard(
                 title = "Listings",
-                total = bundle?.products?.size ?: 0,
+                total = stats.totalListings,
                 slices = listOf(
                     DonutSlice("Active", stats.activeListings, KartSuccess),
                     DonutSlice("Suspended", stats.suspendedListings, KartDanger),
-                    DonutSlice("Sold/Other", soldListings, KartWarning)
+                    DonutSlice("Sold/Other", stats.soldListings, KartWarning)
                 ),
                 onClick = { onNavigateTab("Listings", "All") },
                 modifier = Modifier.weight(1f)
@@ -395,6 +393,7 @@ private fun AdminPendingQueuesBarChartCard(
         Triple("KYC", stats.pendingKyc, KartWarning),
         Triple("Withdrawals", stats.pendingWithdrawals, KartPrimary),
         Triple("Refunds", stats.pendingRefunds, KartDanger),
+        Triple("Deletions", stats.pendingDeletions, KartWarning),
         Triple("Product Reports", stats.openProductReports, KartDanger),
         Triple("User Reports", stats.openUserReports, KartWarning)
     )
@@ -476,7 +475,8 @@ private fun AdminDonutChartCard(
         animationSpec = tween(durationMillis = 340, easing = AdminChartEaseOut),
         label = "donut_$title"
     )
-    val safeTotal = total.coerceAtLeast(1)
+    val sliceSum = slices.sumOf { it.count.coerceAtLeast(0) }
+    val safeTotal = maxOf(total, sliceSum).coerceAtLeast(1)
 
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),

@@ -2,6 +2,8 @@ package com.example.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
 import com.example.data.repository.ApiResult
 import com.example.data.repository.HomeFeedData
 import com.example.data.repository.KartRepository
@@ -9,9 +11,12 @@ import com.example.data.repository.ProductDetailBundle
 import com.example.domain.model.KartGhanaCampuses
 import com.example.domain.model.MarketplaceFilter
 import com.example.domain.model.Product
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -76,6 +81,13 @@ class MarketplaceViewModel(private val repository: KartRepository) : ViewModel()
     private val _uiState = MutableStateFlow(MarketplaceUiState())
     val uiState: StateFlow<MarketplaceUiState> = _uiState.asStateFlow()
 
+    private val _committedFilter = MutableStateFlow(MarketplaceFilter())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val pagedProducts: Flow<PagingData<Product>> = _committedFilter
+        .flatMapLatest { filter -> repository.marketplacePagerFlow(filter) }
+        .cachedIn(viewModelScope)
+
     private var hasInitializedLoad = false
     private var searchDebounceJob: kotlinx.coroutines.Job? = null
     private var loadJob: kotlinx.coroutines.Job? = null
@@ -92,9 +104,10 @@ class MarketplaceViewModel(private val repository: KartRepository) : ViewModel()
         if (!hasInitializedLoad) {
             hasInitializedLoad = true
             if (cat.isNotBlank() && _uiState.value.filter.category != cat) {
-                _uiState.update { it.copy(filter = it.filter.copy(category = cat)) }
+                val updated = _uiState.value.filter.copy(category = cat)
+                _uiState.update { it.copy(filter = updated) }
+                _committedFilter.value = updated
             }
-            loadProducts(reset = true)
         } else if (cat.isNotBlank() && _uiState.value.filter.category != cat) {
             setCategory(cat)
         }
@@ -104,37 +117,40 @@ class MarketplaceViewModel(private val repository: KartRepository) : ViewModel()
         searchDebounceJob?.cancel()
         hasInitializedLoad = true
         _uiState.update { it.copy(filter = newFilter) }
-        loadProducts(reset = true)
+        _committedFilter.value = newFilter
     }
 
     fun updateSearch(query: String) {
-        _uiState.update { it.copy(filter = it.filter.copy(query = query)) }
+        val updated = _uiState.value.filter.copy(query = query)
+        _uiState.update { it.copy(filter = updated) }
         searchDebounceJob?.cancel()
         searchDebounceJob = viewModelScope.launch {
             kotlinx.coroutines.delay(350L)
             hasInitializedLoad = true
-            loadProducts(reset = true)
+            _committedFilter.value = _uiState.value.filter
         }
     }
 
     fun submitSearchNow() {
         searchDebounceJob?.cancel()
         hasInitializedLoad = true
-        loadProducts(reset = true)
+        _committedFilter.value = _uiState.value.filter
     }
 
     fun setCategory(category: String) {
         searchDebounceJob?.cancel()
         hasInitializedLoad = true
-        _uiState.update { it.copy(filter = it.filter.copy(category = category)) }
-        loadProducts(reset = true)
+        val updated = _uiState.value.filter.copy(category = category)
+        _uiState.update { it.copy(filter = updated) }
+        _committedFilter.value = updated
     }
 
     fun resetFilters() {
         searchDebounceJob?.cancel()
         hasInitializedLoad = true
-        _uiState.update { it.copy(filter = MarketplaceFilter()) }
-        loadProducts(reset = true)
+        val fresh = MarketplaceFilter()
+        _uiState.update { it.copy(filter = fresh) }
+        _committedFilter.value = fresh
     }
 
     fun loadProducts(reset: Boolean = false, isRefresh: Boolean = false) {

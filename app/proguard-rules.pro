@@ -6,6 +6,9 @@
 -keep class kotlin.Metadata { *; }
 -keep class com.example.domain.model.** { *; }
 -keep class com.example.data.remote.** { *; }
+-keep class com.example.data.local.** { *; }
+-keep class com.example.data.paging.** { *; }
+-keep class com.example.data.upload.** { *; }
 
 # Moshi
 -keepclasseswithmembers class * {

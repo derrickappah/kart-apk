@@ -4,7 +4,9 @@ import com.example.domain.model.MarketplaceProductsResponse
 import okhttp3.MultipartBody
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.HTTP
 import retrofit2.http.Multipart
 import retrofit2.http.PATCH
 import retrofit2.http.POST
@@ -170,8 +172,14 @@ interface KartWebApi {
     @POST("api/admin/users/ban")
     suspend fun adminBanUser(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
 
+    @POST("api/admin/users/role")
+    suspend fun adminUpdateUserRole(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
+
     @POST("api/admin/products/update-status")
     suspend fun adminUpdateProductStatus(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @HTTP(method = "DELETE", path = "api/admin/products/update-status", hasBody = true)
+    suspend fun adminDeleteProduct(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
 
     @POST("api/admin/verifications/approve")
     suspend fun adminApproveVerification(@Body body: Map<String, String>): Response<Map<String, Any>>
@@ -182,8 +190,26 @@ interface KartWebApi {
     @POST("api/admin/withdrawals/approve")
     suspend fun adminApproveWithdrawal(@Body body: Map<String, String>): Response<Map<String, Any>>
 
+    @POST("api/admin/withdrawals/manual-approve")
+    suspend fun adminManualApproveWithdrawal(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
+
+    @POST("api/admin/withdrawals/retry-paystack")
+    suspend fun adminRetryWithdrawalPaystack(@Body body: Map<String, String>): Response<Map<String, Any>>
+
     @POST("api/admin/withdrawals/reject")
     suspend fun adminRejectWithdrawal(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/admin/account-deletions/approve")
+    suspend fun adminApproveAccountDeletion(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/admin/account-deletions/reject")
+    suspend fun adminRejectAccountDeletion(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/admin/reviews/delete")
+    suspend fun adminDeleteReview(@Body body: Map<String, String>): Response<Map<String, Any>>
+
+    @POST("api/admin/reports")
+    suspend fun adminUpdateReport(@Body body: Map<String, String>): Response<Map<String, Any>>
 
     @POST("api/admin/orders/refund")
     suspend fun adminRefundOrder(@Body body: Map<String, String>): Response<Map<String, Any>>
@@ -191,12 +217,24 @@ interface KartWebApi {
     @POST("api/admin/refund-requests/reject")
     suspend fun adminRejectRefund(@Body body: Map<String, String>): Response<Map<String, Any>>
 
-    @PATCH("api/admin/settings")
-    suspend fun adminPatchSettings(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
+    @GET("api/admin/settings")
+    suspend fun adminGetSettings(): Response<Map<String, Any>>
 
     @PUT("api/admin/settings")
     suspend fun adminPutSettings(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
 
-    @POST("api/admin/settings")
-    suspend fun adminUpdateSettings(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
+    @GET("api/admin/subscription-plans")
+    suspend fun adminGetSubscriptionPlans(): Response<Map<String, Any>>
+
+    @POST("api/admin/subscription-plans")
+    suspend fun adminCreateSubscriptionPlan(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
+
+    @PUT("api/admin/subscription-plans")
+    suspend fun adminUpdateSubscriptionPlan(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<Map<String, Any>>
+
+    @DELETE("api/admin/subscription-plans")
+    suspend fun adminDeleteSubscriptionPlan(@Query("id") id: String): Response<Map<String, Any>>
+
+    @POST("api/admin/subscriptions/update-status")
+    suspend fun adminUpdateSubscriptionStatus(@Body body: Map<String, String>): Response<Map<String, Any>>
 }

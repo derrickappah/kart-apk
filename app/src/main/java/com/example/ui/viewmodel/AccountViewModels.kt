@@ -9,6 +9,8 @@ import com.example.data.repository.ApiResult
 import com.example.data.repository.KartRepository
 import com.example.data.repository.ProfileBundle
 import com.example.domain.model.NotificationItem
+import com.example.domain.model.PlatformFlags
+import com.example.domain.model.Product
 import com.example.domain.model.Profile
 import com.example.domain.model.WishlistRow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -226,6 +228,18 @@ data class AdminUiState(
     val actionLoading: Boolean = false,
     val isLiveConnected: Boolean = false,
     val accessToken: String = "",
+    val loadingMoreUsers: Boolean = false,
+    val loadingMoreProducts: Boolean = false,
+    val searchingUsers: Boolean = false,
+    val searchingProducts: Boolean = false,
+    val searchUsersQuery: String = "",
+    val searchUsersFilter: String = "All",
+    val remoteUsers: List<Profile>? = null,
+    val remoteUsersHasMore: Boolean = false,
+    val searchProductsQuery: String = "",
+    val searchProductsFilter: String = "All",
+    val remoteProducts: List<Product>? = null,
+    val remoteProductsHasMore: Boolean = false,
     val error: String? = null,
     val feedback: String? = null
 )
@@ -238,6 +252,8 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
     private var realtimeJob: kotlinx.coroutines.Job? = null
     private var connectionJob: kotlinx.coroutines.Job? = null
     private var pendingRefreshJob: kotlinx.coroutines.Job? = null
+    private var usersSearchJob: kotlinx.coroutines.Job? = null
+    private var productsSearchJob: kotlinx.coroutines.Job? = null
 
     fun startLiveUpdates() {
         pendingRefreshJob?.cancel()
@@ -253,7 +269,7 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
                 realtimeClient.tableEvents.collect {
                     pendingRefreshJob?.cancel()
                     pendingRefreshJob = launch {
-                        kotlinx.coroutines.delay(1_000L)
+                        kotlinx.coroutines.delay(15_000L)
                         loadDashboard(forceRefresh = true, silent = true)
                     }
                 }
@@ -266,6 +282,8 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
 
     fun stopLiveUpdates() {
         pendingRefreshJob?.cancel()
+        usersSearchJob?.cancel()
+        productsSearchJob?.cancel()
         realtimeJob?.cancel()
         connectionJob?.cancel()
         realtimeClient.disconnect()
@@ -293,14 +311,218 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
                 _uiState.update { it.copy(loading = true, error = null, accessToken = token) }
             }
             when (val res = repository.fetchAdminBundle()) {
-                is ApiResult.Success -> _uiState.update { it.copy(loading = false, bundle = res.data, accessToken = token) }
+                is ApiResult.Success -> {
+                    val cur = _uiState.value
+                    _uiState.update { it.copy(loading = false, bundle = res.data, accessToken = token) }
+                    if (cur.searchUsersQuery.isNotBlank() || cur.searchUsersFilter != "All") {
+                        searchUsersRemote(cur.searchUsersQuery, cur.searchUsersFilter)
+                    }
+                    if (cur.searchProductsQuery.isNotBlank() || cur.searchProductsFilter != "All") {
+                        searchProductsRemote(cur.searchProductsQuery, cur.searchProductsFilter)
+                    }
+                }
                 is ApiResult.Error -> _uiState.update { it.copy(loading = false, error = if (silent || cached != null) it.error else res.message) }
+            }
+        }
+    }
+
+    fun searchUsersRemote(query: String, filter: String) {
+        usersSearchJob?.cancel()
+        val trimmed = query.trim()
+        if (trimmed.isBlank() && filter == "All") {
+            _uiState.update {
+                it.copy(
+                    searchingUsers = false,
+                    searchUsersQuery = "",
+                    searchUsersFilter = "All",
+                    remoteUsers = null,
+                    remoteUsersHasMore = false
+                )
+            }
+            return
+        }
+        usersSearchJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    searchingUsers = true,
+                    searchUsersQuery = trimmed,
+                    searchUsersFilter = filter
+                )
+            }
+            when (val res = repository.fetchAdminUsersPage(offset = 0, limit = 50, query = trimmed, filter = filter)) {
+                is ApiResult.Success -> {
+                    val (items, hasMore) = res.data
+                    _uiState.update { state ->
+                        val updatedMap = state.bundle?.usersById.orEmpty().toMutableMap()
+                        items.forEach { updatedMap[it.id] = it }
+                        state.copy(
+                            searchingUsers = false,
+                            remoteUsers = items,
+                            remoteUsersHasMore = hasMore,
+                            bundle = state.bundle?.copy(usersById = updatedMap)
+                        )
+                    }
+                }
+                is ApiResult.Error -> _uiState.update { it.copy(searchingUsers = false) }
+            }
+        }
+    }
+
+    fun searchProductsRemote(query: String, filter: String) {
+        productsSearchJob?.cancel()
+        val trimmed = query.trim()
+        if (trimmed.isBlank() && filter == "All") {
+            _uiState.update {
+                it.copy(
+                    searchingProducts = false,
+                    searchProductsQuery = "",
+                    searchProductsFilter = "All",
+                    remoteProducts = null,
+                    remoteProductsHasMore = false
+                )
+            }
+            return
+        }
+        productsSearchJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    searchingProducts = true,
+                    searchProductsQuery = trimmed,
+                    searchProductsFilter = filter
+                )
+            }
+            when (val res = repository.fetchAdminProductsPage(offset = 0, limit = 50, query = trimmed, filter = filter)) {
+                is ApiResult.Success -> {
+                    val (items, hasMore, resolvedUsers) = res.data
+                    _uiState.update { state ->
+                        val updatedProductsMap = state.bundle?.productsById.orEmpty().toMutableMap()
+                        items.forEach { updatedProductsMap[it.id] = it }
+                        val updatedUsersMap = state.bundle?.usersById.orEmpty().toMutableMap()
+                        updatedUsersMap.putAll(resolvedUsers)
+                        state.copy(
+                            searchingProducts = false,
+                            remoteProducts = items,
+                            remoteProductsHasMore = hasMore,
+                            bundle = state.bundle?.copy(
+                                productsById = updatedProductsMap,
+                                usersById = updatedUsersMap
+                            )
+                        )
+                    }
+                }
+                is ApiResult.Error -> _uiState.update { it.copy(searchingProducts = false) }
+            }
+        }
+    }
+
+    fun loadMoreUsers() {
+        val state = _uiState.value
+        val bundle = state.bundle ?: return
+        if (state.loadingMoreUsers) return
+        val remote = state.remoteUsers
+        val inRemoteMode = remote != null
+        val offset = remote?.size ?: bundle.users.size
+        val query = if (inRemoteMode) state.searchUsersQuery else ""
+        val filter = if (inRemoteMode) state.searchUsersFilter else "All"
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(loadingMoreUsers = true) }
+            when (val res = repository.fetchAdminUsersPage(offset = offset, limit = 50, query = query, filter = filter)) {
+                is ApiResult.Success -> {
+                    val (newItems, hasMore) = res.data
+                    _uiState.update { cur ->
+                        val curBundle = cur.bundle ?: return@update cur.copy(loadingMoreUsers = false)
+                        val updatedUsersMap = curBundle.usersById.toMutableMap()
+                        newItems.forEach { updatedUsersMap[it.id] = it }
+                        if (inRemoteMode) {
+                            val existingIds = cur.remoteUsers.orEmpty().map { it.id }.toSet()
+                            val merged = cur.remoteUsers.orEmpty() + newItems.filterNot { it.id in existingIds }
+                            cur.copy(
+                                loadingMoreUsers = false,
+                                remoteUsers = merged,
+                                remoteUsersHasMore = hasMore,
+                                bundle = curBundle.copy(usersById = updatedUsersMap)
+                            )
+                        } else {
+                            val existingIds = curBundle.users.map { it.id }.toSet()
+                            val merged = curBundle.users + newItems.filterNot { it.id in existingIds }
+                            cur.copy(
+                                loadingMoreUsers = false,
+                                bundle = curBundle.copy(
+                                    users = merged,
+                                    usersById = updatedUsersMap,
+                                    usersHasMore = hasMore
+                                )
+                            )
+                        }
+                    }
+                }
+                is ApiResult.Error -> _uiState.update { it.copy(loadingMoreUsers = false, feedback = res.message) }
+            }
+        }
+    }
+
+    fun loadMoreProducts() {
+        val state = _uiState.value
+        val bundle = state.bundle ?: return
+        if (state.loadingMoreProducts) return
+        val remote = state.remoteProducts
+        val inRemoteMode = remote != null
+        val offset = remote?.size ?: bundle.products.size
+        val query = if (inRemoteMode) state.searchProductsQuery else ""
+        val filter = if (inRemoteMode) state.searchProductsFilter else "All"
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(loadingMoreProducts = true) }
+            when (val res = repository.fetchAdminProductsPage(offset = offset, limit = 50, query = query, filter = filter)) {
+                is ApiResult.Success -> {
+                    val (newItems, hasMore, resolvedUsers) = res.data
+                    _uiState.update { cur ->
+                        val curBundle = cur.bundle ?: return@update cur.copy(loadingMoreProducts = false)
+                        val updatedProductsMap = curBundle.productsById.toMutableMap()
+                        newItems.forEach { updatedProductsMap[it.id] = it }
+                        val updatedUsersMap = curBundle.usersById.toMutableMap()
+                        updatedUsersMap.putAll(resolvedUsers)
+                        if (inRemoteMode) {
+                            val existingIds = cur.remoteProducts.orEmpty().map { it.id }.toSet()
+                            val merged = cur.remoteProducts.orEmpty() + newItems.filterNot { it.id in existingIds }
+                            cur.copy(
+                                loadingMoreProducts = false,
+                                remoteProducts = merged,
+                                remoteProductsHasMore = hasMore,
+                                bundle = curBundle.copy(
+                                    productsById = updatedProductsMap,
+                                    usersById = updatedUsersMap
+                                )
+                            )
+                        } else {
+                            val existingIds = curBundle.products.map { it.id }.toSet()
+                            val merged = curBundle.products + newItems.filterNot { it.id in existingIds }
+                            cur.copy(
+                                loadingMoreProducts = false,
+                                bundle = curBundle.copy(
+                                    products = merged,
+                                    productsById = updatedProductsMap,
+                                    usersById = updatedUsersMap,
+                                    productsHasMore = hasMore
+                                )
+                            )
+                        }
+                    }
+                }
+                is ApiResult.Error -> _uiState.update { it.copy(loadingMoreProducts = false, feedback = res.message) }
             }
         }
     }
 
     fun toggleBan(userId: String, ban: Boolean) {
         runAdminCall("User ${if (ban) "suspended" else "reinstated"}") { repository.adminBanUser(userId, ban) }
+    }
+
+    fun toggleAdminRole(userId: String, makeAdmin: Boolean) {
+        runAdminCall(if (makeAdmin) "Admin privileges granted" else "Admin privileges revoked") {
+            repository.adminUpdateUserRole(userId, makeAdmin)
+        }
     }
 
     fun updateProductStatus(productId: String, status: String) {
@@ -317,18 +539,35 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
-    fun resolveWithdrawal(requestId: String, approve: Boolean) {
+    fun resolveWithdrawal(requestId: String, approve: Boolean, reason: String? = null) {
         runAdminCall("Withdrawal ${if (approve) "approved" else "rejected"}") {
-            repository.adminResolveWithdrawal(requestId, approve)
+            repository.adminResolveWithdrawal(requestId, approve, reason)
         }
     }
 
-    fun resolveDeletionRequest(requestId: String, userId: String?, approve: Boolean) {
+    fun manualApproveWithdrawal(
+        requestId: String,
+        manualReference: String? = null,
+        manualTransactionId: String? = null,
+        manualNotes: String? = null
+    ) {
+        runAdminCall("Withdrawal manually approved") {
+            repository.adminManualApproveWithdrawal(requestId, manualReference, manualTransactionId, manualNotes)
+        }
+    }
+
+    fun retryWithdrawalPaystack(requestId: String) {
+        runAdminCall("Paystack transfer retried") {
+            repository.adminRetryWithdrawalPaystack(requestId)
+        }
+    }
+
+    fun resolveDeletionRequest(requestId: String, userId: String?, approve: Boolean, reason: String? = null) {
         runAdminCall(
             if (approve) "Account banned, listings suspended, and deletion approved"
             else "Deletion request rejected"
         ) {
-            repository.adminResolveDeletionRequest(requestId, userId, approve)
+            repository.adminResolveDeletionRequest(requestId, userId, approve, reason)
         }
     }
 
@@ -360,6 +599,30 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
         runAdminCall("Campus deleted") { repository.adminDeleteCampus(id) }
     }
 
+    fun createSubscriptionPlan(name: String, price: Double, durationMonths: Int, features: List<String>) {
+        runAdminCall("Subscription plan created") {
+            repository.adminCreateSubscriptionPlan(name, price, durationMonths, features)
+        }
+    }
+
+    fun updateSubscriptionPlan(id: String, name: String, price: Double, durationMonths: Int, features: List<String>) {
+        runAdminCall("Subscription plan updated") {
+            repository.adminUpdateSubscriptionPlan(id, name, price, durationMonths, features)
+        }
+    }
+
+    fun deleteSubscriptionPlan(id: String) {
+        runAdminCall("Subscription plan deleted") {
+            repository.adminDeleteSubscriptionPlan(id)
+        }
+    }
+
+    fun updateSubscriptionStatus(subscriptionId: String, status: String) {
+        runAdminCall("Subscription marked $status") {
+            repository.adminUpdateSubscriptionStatus(subscriptionId, status)
+        }
+    }
+
     fun resolveRefund(orderId: String, requestId: String, approve: Boolean) {
         if (approve && orderId.isBlank()) {
             _uiState.update { it.copy(feedback = "Cannot approve refund: Order ID is missing.") }
@@ -376,9 +639,10 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
             when (val res = repository.adminSetPlatformSetting(KartRepository.KEY_BUY_NOW_ENABLED, enabled)) {
                 is ApiResult.Success -> {
                     _uiState.update { state ->
+                        val updatedFlags = (state.bundle?.platformFlags ?: PlatformFlags()).copy(buyNowEnabled = enabled)
                         state.copy(
                             actionLoading = false,
-                            bundle = state.bundle?.copy(buyNowEnabled = enabled),
+                            bundle = state.bundle?.copy(buyNowEnabled = enabled, platformFlags = updatedFlags),
                             feedback = if (enabled) {
                                 "Buy Now turned on for product pages"
                             } else {
@@ -402,9 +666,10 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
             when (val res = repository.adminSetPlatformSetting(KartRepository.KEY_MAINTENANCE_MODE, enabled)) {
                 is ApiResult.Success -> {
                     _uiState.update { state ->
+                        val updatedFlags = (state.bundle?.platformFlags ?: PlatformFlags()).copy(isMaintenanceMode = enabled)
                         state.copy(
                             actionLoading = false,
-                            bundle = state.bundle?.copy(isMaintenanceMode = enabled),
+                            bundle = state.bundle?.copy(isMaintenanceMode = enabled, platformFlags = updatedFlags),
                             feedback = if (enabled) {
                                 "Maintenance mode enabled for non-admin users"
                             } else {
@@ -422,22 +687,54 @@ class AdminViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
-    fun updatePromotionRates(boostRate: Double, featuredRate: Double, campusAdRate: Double) {
+    fun updatePromotionRates(
+        dailyPrice: Double,
+        weeklyPrice: Double,
+        featuredPrice: Double,
+        onUpdated: () -> Unit = {}
+    ) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
-            when (val res = repository.adminUpdatePromotionRates(boostRate, featuredRate, campusAdRate)) {
+            when (val res = repository.adminUpdatePromotionRates(dailyPrice, weeklyPrice, featuredPrice)) {
                 is ApiResult.Success -> {
                     _uiState.update { state ->
+                        val updatedFlags = (state.bundle?.platformFlags ?: PlatformFlags()).copy(
+                            promoDailyPrice = dailyPrice,
+                            promoWeeklyPrice = weeklyPrice,
+                            promoFeaturedPrice = featuredPrice
+                        )
                         state.copy(
                             actionLoading = false,
                             bundle = state.bundle?.copy(
-                                promoBoostRate = boostRate,
-                                promoFeaturedRate = featuredRate,
-                                promoCampusAdRate = campusAdRate
+                                promoDailyPrice = dailyPrice,
+                                promoWeeklyPrice = weeklyPrice,
+                                promoFeaturedPrice = featuredPrice,
+                                platformFlags = updatedFlags
                             ),
                             feedback = "Promotion rates updated"
                         )
                     }
+                    onUpdated()
+                    loadDashboard(forceRefresh = true, silent = true)
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { it.copy(actionLoading = false, feedback = res.message) }
+                }
+            }
+        }
+    }
+
+    fun savePlatformSettings(
+        updates: List<Pair<String, Any>>,
+        successMsg: String = "Platform settings saved",
+        onUpdated: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(actionLoading = true) }
+            when (val res = repository.adminSavePlatformSettings(updates)) {
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(actionLoading = false, feedback = successMsg) }
+                    onUpdated()
                     loadDashboard(forceRefresh = true, silent = true)
                 }
                 is ApiResult.Error -> {

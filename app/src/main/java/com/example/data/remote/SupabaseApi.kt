@@ -2,10 +2,13 @@ package com.example.data.remote
 
 import com.example.domain.model.AccountDeletionRequestRow
 import com.example.domain.model.ActiveAdvertisementRow
+import com.example.domain.model.AdminOverviewStatsRpc
 import com.example.domain.model.AuthResponse
 import com.example.domain.model.CampusRow
 import com.example.domain.model.ConversationRow
 import com.example.domain.model.FollowRow
+import com.example.domain.model.FollowStatsRpc
+import com.example.domain.model.InboxItemRpc
 import com.example.domain.model.MessageRow
 import com.example.domain.model.NotificationItem
 import com.example.domain.model.Order
@@ -16,9 +19,11 @@ import com.example.domain.model.RefundRequestRow
 import com.example.domain.model.ReportRow
 import com.example.domain.model.Review
 import com.example.domain.model.SubscriptionPlan
+import com.example.domain.model.UnreadSummaryRpc
 import com.example.domain.model.UserSubscription
 import com.example.domain.model.VerificationRequestRow
 import com.example.domain.model.Wallet
+import com.example.domain.model.WalletTransaction
 import com.example.domain.model.WishlistRow
 import com.example.domain.model.WithdrawalRequestRow
 import okhttp3.RequestBody
@@ -149,6 +154,26 @@ interface SupabaseApi {
     @GET("rest/v1/wallets")
     suspend fun getWallets(@QueryMap params: Map<String, String>): Response<List<Wallet>>
 
+    @GET("rest/v1/wallet_transactions")
+    suspend fun getWalletTransactions(@QueryMap params: Map<String, String>): Response<List<WalletTransaction>>
+
+    // --- Scalable RPCs ---
+    @POST("rest/v1/rpc/get_unread_summary")
+    suspend fun getUnreadSummary(): Response<UnreadSummaryRpc>
+
+    @POST("rest/v1/rpc/get_follow_stats")
+    suspend fun getFollowStats(
+        @Body body: Map<String, String>
+    ): Response<FollowStatsRpc>
+
+    @POST("rest/v1/rpc/get_admin_overview_stats")
+    suspend fun getAdminOverviewStats(): Response<AdminOverviewStatsRpc>
+
+    @POST("rest/v1/rpc/get_user_inbox")
+    suspend fun getUserInbox(
+        @Body body: Map<String, Int> = mapOf("p_limit" to 40)
+    ): Response<List<InboxItemRpc>>
+
     // --- Wishlist ---
     @GET("rest/v1/wishlist")
     suspend fun getWishlist(@QueryMap params: Map<String, String>): Response<List<WishlistRow>>
@@ -208,6 +233,13 @@ interface SupabaseApi {
 
     @GET("rest/v1/subscriptions")
     suspend fun getSubscriptions(@QueryMap params: Map<String, String>): Response<List<UserSubscription>>
+
+    @Headers("Prefer: return=representation")
+    @PATCH("rest/v1/subscriptions")
+    suspend fun updateSubscription(
+        @Query("id") idFilter: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<List<UserSubscription>>
 
     // --- Platform Settings & Campuses ---
     @GET("rest/v1/platform_settings")

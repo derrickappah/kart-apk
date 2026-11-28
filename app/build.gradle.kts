@@ -16,8 +16,8 @@ android {
     applicationId = "kart.cx"
     minSdk = 24
     targetSdk = 36
-    versionCode = 7
-    versionName = "1.0.6"
+    versionCode = 12
+    versionName = "1.0.11"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -84,6 +84,10 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+ksp {
+  arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
@@ -109,8 +113,11 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.navigation.compose)
-  // implementation(libs.androidx.room.ktx)
-  // implementation(libs.androidx.room.runtime)
+  implementation(libs.androidx.room.ktx)
+  implementation(libs.androidx.room.runtime)
+  implementation(libs.androidx.room.paging)
+  implementation(libs.androidx.paging.runtime.ktx)
+  implementation(libs.androidx.paging.compose)
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.lottie.compose)
@@ -123,10 +130,11 @@ dependencies {
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services)
   implementation(libs.googleid)
-  // implementation(libs.firebase.appcheck.recaptcha)
-  // implementation(libs.firebase.appcheck.debug)
+  implementation(libs.firebase.appcheck.playintegrity)
+  debugImplementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.kotlinx.coroutines.play.services)
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
@@ -145,6 +153,6 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  // "ksp"(libs.androidx.room.compiler)
+  "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }

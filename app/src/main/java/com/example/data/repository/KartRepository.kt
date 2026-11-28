@@ -2,14 +2,39 @@ package com.example.data.repository
 
 import android.content.ContentResolver
 import android.net.Uri
+import androidx.paging.ExperimentalPagingApi
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.PagingSource
+import androidx.paging.PagingState
+import androidx.paging.map
 import com.example.BuildConfig
+import com.example.data.local.KartDatabase
+import com.example.data.local.OrderEntity
 import com.example.data.local.SessionStore
+import com.example.data.paging.MarketplaceRemoteMediator
+import com.example.data.paging.toFilterSpec
+import com.example.data.remote.AdminConsolePageResponse
+import com.example.data.remote.ConversationsCursorResponse
+import com.example.data.remote.KartCursorApi
 import com.example.data.remote.KartWebApi
+import com.example.data.remote.MessagesCursorResponse
+import com.example.data.remote.NotificationsCursorResponse
+import com.example.data.remote.OrdersCursorResponse
+import com.example.data.remote.PresenceBatchResponse
+import com.example.data.remote.ReviewsCursorResponse
 import com.example.data.remote.SupabaseApi
+import com.example.data.remote.WalletTransactionsCursorResponse
+import com.example.data.remote.WishlistCursorResponse
+import com.example.data.upload.DirectR2Uploader
 import com.example.domain.model.AccountDeletionRequestRow
 import com.example.domain.model.ActiveAdvertisementRow
+import com.example.domain.model.AdminOverviewStatsRpc
 import com.example.domain.model.CampusRow
 import com.example.domain.model.EnrichedConversation
+import com.example.domain.model.FollowStatsRpc
+import com.example.domain.model.KartErrorFormatter
 import com.example.domain.model.KartFormatters
 import com.example.domain.model.KartGhanaCampuses
 import com.example.domain.model.MarketplaceFilter
@@ -40,6 +65,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -117,21 +144,31 @@ data class AdminDashboardBundle(
     val reviews: List<Review>,
     val advertisements: List<ActiveAdvertisementRow>,
     val campuses: List<CampusRow>,
+    val subscriptionPlans: List<SubscriptionPlan> = emptyList(),
+    val subscriptions: List<UserSubscription> = emptyList(),
     val usersById: Map<String, Profile> = emptyMap(),
     val ordersById: Map<String, Order> = emptyMap(),
     val productsById: Map<String, Product> = emptyMap(),
     val buyNowEnabled: Boolean = true,
     val isMaintenanceMode: Boolean = false,
-    val promoBoostRate: Double = 15.0,
-    val promoFeaturedRate: Double = 35.0,
-    val promoCampusAdRate: Double = 65.0
+    val promoDailyPrice: Double = 5.0,
+    val promoWeeklyPrice: Double = 25.0,
+    val promoFeaturedPrice: Double = 50.0,
+    val platformFlags: PlatformFlags = PlatformFlags(),
+    val serverStats: AdminOverviewStatsRpc? = null,
+    val usersHasMore: Boolean = false,
+    val productsHasMore: Boolean = false
 )
 
 class KartRepository(
     private val supabaseApi: SupabaseApi,
     private val kartWebApi: KartWebApi,
     val sessionStore: SessionStore,
-    private val hasSupabaseKey: () -> Boolean
+    private val hasSupabaseKey: () -> Boolean,
+    val chatCacheStore: com.example.data.local.ChatCacheStore? = null,
+    private val kartCursorApi: KartCursorApi? = null,
+    private val directR2Uploader: DirectR2Uploader? = null,
+    private val databaseProvider: (() -> KartDatabase)? = null
 ) {
     private val trackedAdViews = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val trackedAdClicks = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -149,11 +186,21 @@ class KartRepository(
             "whatsapp_number", "instagram", "snapchat", "avatar_url"
         )
         private val ACTIVE_ORDER_STATUSES = setOf("paid", "shipped", "disputed")
+        private val UUID_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         const val KEY_MAINTENANCE_MODE = "maintenance_mode"
         const val KEY_BUY_NOW_ENABLED = "buy_now_enabled"
-        const val KEY_PROMO_BOOST_RATE = "promo_boost_rate"
-        const val KEY_PROMO_FEATURED_RATE = "promo_featured_rate"
-        const val KEY_PROMO_CAMPUS_AD_RATE = "promo_campus_ad_rate"
+        const val KEY_PROMO_DAILY_PRICE = "promo_daily_price"
+        const val KEY_PROMO_WEEKLY_PRICE = "promo_weekly_price"
+        const val KEY_PROMO_FEATURED_PRICE = "promo_featured_price"
+        const val KEY_MARKETPLACE_SERVICE_FEE = "marketplace_service_fee"
+        const val KEY_TRANSACTION_FEE_FIXED = "transaction_fee_fixed"
+        const val KEY_TRANSACTION_FEE_PERCENT = "transaction_fee_percent"
+        const val KEY_WITHDRAWAL_FEE_FLAT = "withdrawal_fee_flat"
+        const val KEY_MIN_DEPOSIT_AMOUNT = "min_deposit_amount"
+        const val KEY_MIN_WITHDRAWAL_AMOUNT = "min_withdrawal_amount"
+        const val KEY_MAX_LISTING_PRICE = "max_listing_price"
+        const val KEY_PLATFORM_SUPPORT_EMAIL = "platform_support_email"
+        const val KEY_WHATSAPP_SUPPORT_NUMBER = "whatsapp_support_number"
 
         internal fun parseHttpErrorBody(errBody: String, statusCode: Int): String? {
             val trimmed = errBody.trim()
@@ -181,6 +228,58 @@ class KartRepository(
                 }
             }
             return trimmed.take(180)
+        }
+
+        internal fun compressImageBytes(
+            rawBytes: ByteArray,
+            maxDimensionPx: Int = 1440,
+            jpegQuality: Int = 82
+        ): ByteArray? {
+            if (rawBytes.isEmpty() || maxDimensionPx <= 0) return null
+            return runCatching {
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+                val srcW = bounds.outWidth
+                val srcH = bounds.outHeight
+                if (srcW <= 0 || srcH <= 0) return null
+
+                var sampleSize = 1
+                while ((srcW / sampleSize) > maxDimensionPx * 2 || (srcH / sampleSize) > maxDimensionPx * 2) {
+                    sampleSize *= 2
+                }
+
+                val decodeOpts = android.graphics.BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                }
+                val decoded = android.graphics.BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
+                    ?: return null
+                var target = decoded
+                try {
+                    val curW = decoded.width
+                    val curH = decoded.height
+                    if (curW > maxDimensionPx || curH > maxDimensionPx) {
+                        val ratio = kotlin.math.min(
+                            maxDimensionPx.toDouble() / curW,
+                            maxDimensionPx.toDouble() / curH
+                        )
+                        val dstW = (curW * ratio).toInt().coerceAtLeast(1)
+                        val dstH = (curH * ratio).toInt().coerceAtLeast(1)
+                        val scaled = android.graphics.Bitmap.createScaledBitmap(decoded, dstW, dstH, true)
+                        if (scaled !== decoded) {
+                            decoded.recycle()
+                            target = scaled
+                        }
+                    }
+                    val out = java.io.ByteArrayOutputStream()
+                    if (!target.compress(android.graphics.Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(50, 95), out)) {
+                        return null
+                    }
+                    val compressed = out.toByteArray()
+                    compressed.takeIf { it.isNotEmpty() && it.size < rawBytes.size }
+                } finally {
+                    if (!target.isRecycled) target.recycle()
+                }
+            }.getOrNull()
         }
     }
 
@@ -288,7 +387,7 @@ class KartRepository(
                         activeAds = fetched.filter { it.advertisementId != null || it.isFeatured == true || it.isBoosted == true }
                     }
                 } else {
-                    return ApiResult.Error("Unable to load campus feed (${webRes.code()})", webRes.code())
+                    return ApiResult.Error(KartErrorFormatter.fromHttpStatus(webRes.code(), fallback = "Unable to load campus feed"), webRes.code())
                 }
             }
 
@@ -332,7 +431,7 @@ class KartRepository(
                 )
             )
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Network error while loading Home feed.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Network error while loading Home feed."))
         }
     }
 
@@ -356,11 +455,63 @@ class KartRepository(
             if (res.isSuccessful && res.body() != null) {
                 ApiResult.Success(res.body()!!)
             } else {
-                ApiResult.Error("Failed to fetch marketplace listings (${res.code()})", res.code())
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Failed to fetch marketplace listings"), res.code())
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Unable to connect to Kart marketplace.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Unable to connect to Kart marketplace."))
         }
+    }
+
+    @OptIn(ExperimentalPagingApi::class)
+    fun marketplacePagerFlow(filter: MarketplaceFilter): Flow<PagingData<Product>> {
+        val db = runCatching { databaseProvider?.invoke() }.getOrNull()
+        val cursorApi = kartCursorApi
+        val spec = filter.toFilterSpec()
+        val feedKey = spec.feedKey()
+        if (db != null && cursorApi != null) {
+            return Pager(
+                config = PagingConfig(
+                    pageSize = 20,
+                    prefetchDistance = 6,
+                    initialLoadSize = 20,
+                    enablePlaceholders = false
+                ),
+                remoteMediator = MarketplaceRemoteMediator(
+                    filter = spec,
+                    database = db,
+                    api = cursorApi
+                ),
+                pagingSourceFactory = { db.productDao().pagingSource(feedKey) }
+            ).flow.map { pagingData -> pagingData.map { entity -> entity.toDomainProduct() } }
+        }
+        return Pager(
+            config = PagingConfig(
+                pageSize = 12,
+                prefetchDistance = 4,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = {
+                object : PagingSource<Int, Product>() {
+                    override fun getRefreshKey(state: PagingState<Int, Product>): Int? =
+                        state.anchorPosition?.let { anchor ->
+                            val page = state.closestPageToPosition(anchor)
+                            page?.prevKey?.plus(1) ?: page?.nextKey?.minus(1)
+                        }
+
+                    override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Product> {
+                        val page = params.key ?: 1
+                        return when (val res = fetchMarketplaceProducts(filter, page = page, limit = params.loadSize.coerceIn(10, 40))) {
+                            is ApiResult.Success -> LoadResult.Page(
+                                data = res.data.products,
+                                prevKey = if (page > 1) page - 1 else null,
+                                nextKey = if (res.data.hasMore) page + 1 else null
+                            )
+                            is ApiResult.Error -> LoadResult.Error(IllegalStateException(res.message))
+                        }
+                    }
+                }
+            }
+        ).flow
     }
 
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -468,12 +619,26 @@ class KartRepository(
                 }
 
                 val followsDef = async(Dispatchers.IO) {
-                    if (!useSupabase || sellerId.isNullOrBlank()) emptyList()
+                    if (!useSupabase || sellerId.isNullOrBlank()) null
                     else runCatching {
-                        supabaseApi.getFollows(
-                            mapOf("select" to "id,follower_id,following_id", "following_id" to "eq.$sellerId")
-                        ).body().orEmpty()
-                    }.getOrDefault(emptyList())
+                        val rpcRes = supabaseApi.getFollowStats(mapOf("p_target_user_id" to sellerId))
+                        if (rpcRes.isSuccessful && rpcRes.body() != null) {
+                            rpcRes.body()!!
+                        } else {
+                            val rows = supabaseApi.getFollows(
+                                mapOf(
+                                    "select" to "id,follower_id,following_id",
+                                    "following_id" to "eq.$sellerId",
+                                    "limit" to "50"
+                                )
+                            ).body().orEmpty()
+                            FollowStatsRpc(
+                                followersCount = rows.size,
+                                followingCount = 0,
+                                isFollowing = currentUserId != null && rows.any { it.followerId == currentUserId }
+                            )
+                        }
+                    }.getOrNull()
                 }
 
                 val similarDef = async(Dispatchers.IO) {
@@ -518,9 +683,9 @@ class KartRepository(
                 val hasUserReviewed = !currentUserId.isNullOrBlank() &&
                     reviews.any { it.buyerId == currentUserId || it.reviewerId == currentUserId }
 
-                val follows = followsDef.await()
-                val followerCount = follows.size
-                val isFollowing = currentUserId != null && follows.any { it.followerId == currentUserId }
+                val followStats = followsDef.await()
+                val followerCount = followStats?.followersCount ?: 0
+                val isFollowing = currentUserId != null && (followStats?.isFollowing == true)
 
                 ApiResult.Success(
                     ProductDetailBundle(
@@ -537,7 +702,7 @@ class KartRepository(
                 )
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load listing details.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load listing details."))
         }
     }
 
@@ -549,7 +714,7 @@ class KartRepository(
             if (res.isSuccessful && product != null) ApiResult.Success(product)
             else ApiResult.Error("Listing not found.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load listing.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load listing."))
         }
     }
 
@@ -592,12 +757,12 @@ class KartRepository(
                 val msg = when {
                     errBody.contains("Email not confirmed", true) -> "Please confirm your email address before signing in."
                     errBody.contains("Invalid login credentials", true) -> "Invalid email or password."
-                    else -> "Sign in failed (${res.code()}). Please verify your credentials."
+                    else -> KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Sign in failed. Please verify your credentials.")
                 }
                 ApiResult.Error(msg, res.code())
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Network error while signing in.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Network error while signing in."))
         }
     }
 
@@ -626,14 +791,17 @@ class KartRepository(
                 }
                 ApiResult.Success(session)
             } else {
-                val errBody = res.errorBody()?.string().orEmpty()
                 ApiResult.Error(
-                    errBody.ifBlank { "Google sign-in failed (${res.code()}). Please try again." },
+                    KartErrorFormatter.fromHttpStatus(
+                        res.code(),
+                        extractHttpErrorMessage(res),
+                        "Google sign-in failed. Please try again."
+                    ),
                     res.code()
                 )
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Network error while signing in with Google.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Network error while signing in with Google."))
         }
     }
 
@@ -676,10 +844,10 @@ class KartRepository(
                     ApiResult.Success("Account created! Check your email to verify your Kart account.")
                 }
             } else {
-                ApiResult.Error("Sign up failed (${res.code()}). Email may already be registered.", res.code())
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Sign up failed. Email may already be registered."), res.code())
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Network error during sign up.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Network error during sign up."))
         }
     }
 
@@ -718,10 +886,10 @@ class KartRepository(
                 }
                 ApiResult.Success(session)
             } else {
-                ApiResult.Error(extractHttpErrorMessage(res) ?: "Google sign-in failed (${res.code()}).")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Google sign-in failed."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Network error while completing Google sign-in.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Network error while completing Google sign-in."))
         }
     }
 
@@ -746,7 +914,7 @@ class KartRepository(
                 ApiResult.Error("Session expired. Please sign in again.")
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to refresh session.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to refresh session."))
         }
     }
 
@@ -762,12 +930,12 @@ class KartRepository(
                 val msg = when {
                     errBody.contains("rate limit", true) || res.code() == 429 ->
                         "Too many reset attempts. Please wait a moment and try again."
-                    else -> "Could not send reset code (${res.code()})."
+                    else -> KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Could not send reset code.")
                 }
                 ApiResult.Error(msg)
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to send reset code.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to send reset code."))
         }
     }
 
@@ -796,12 +964,12 @@ class KartRepository(
                     errBody.contains("expired", true) -> "This code has expired. Please request a new code."
                     errBody.contains("invalid", true) || res.code() in setOf(400, 401, 403) ->
                         "Invalid or expired verification code. Please check and try again."
-                    else -> "Could not verify code (${res.code()})."
+                    else -> KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Could not verify code.")
                 }
                 ApiResult.Error(msg)
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to verify code.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to verify code."))
         }
     }
 
@@ -823,12 +991,12 @@ class KartRepository(
                         "Please choose a stronger password (at least 6 characters)."
                     res.code() in setOf(401, 403) ->
                         "Your reset session expired. Please request a new 6-digit code."
-                    else -> "Could not update password (${res.code()})."
+                    else -> KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Could not update password.")
                 }
                 ApiResult.Error(msg)
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to update password.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to update password."))
         }
     }
 
@@ -917,14 +1085,26 @@ class KartRepository(
 
     @Volatile
     private var lastKnownPlatformFlags: PlatformFlags? = null
+    @Volatile
+    private var platformFlagsFetchedAtMs: Long = 0L
 
-    suspend fun fetchPlatformFlags(): PlatformFlags {
+    @Volatile
+    private var cachedCampuses: List<String>? = null
+    @Volatile
+    private var campusesFetchedAtMs: Long = 0L
+
+    suspend fun fetchPlatformFlags(forceRefresh: Boolean = false): PlatformFlags {
         if (!hasSupabaseKey()) return lastKnownPlatformFlags ?: PlatformFlags()
+        val now = System.currentTimeMillis()
+        val cached = lastKnownPlatformFlags
+        if (!forceRefresh && cached != null && (now - platformFlagsFetchedAtMs) < 60_000L) {
+            return cached
+        }
         return runCatching {
             val res = supabaseApi.getPlatformSettings(
                 mapOf(
-                    "select" to "key,value",
-                    "key" to "in.($KEY_MAINTENANCE_MODE,$KEY_BUY_NOW_ENABLED,$KEY_PROMO_BOOST_RATE,$KEY_PROMO_FEATURED_RATE,$KEY_PROMO_CAMPUS_AD_RATE)"
+                    "select" to "key,value,category,label,description",
+                    "limit" to "100"
                 )
             )
             if (!res.isSuccessful) {
@@ -934,8 +1114,12 @@ class KartRepository(
             val byKey = rows.associateBy { it.key.lowercase(Locale.US) }
             fun parseDoubleSetting(raw: Any?, default: Double): Double = when (raw) {
                 is Number -> raw.toDouble()
-                is String -> raw.trim().toDoubleOrNull() ?: default
+                is String -> raw.trim().trim('"').trim().toDoubleOrNull() ?: default
                 else -> default
+            }
+            fun parseStringSetting(raw: Any?, default: String): String {
+                val cleaned = raw?.toString()?.trim()?.trim('"')?.trim().orEmpty()
+                return if (cleaned.isNotBlank() && !cleaned.equals("null", true)) cleaned else default
             }
             val parsed = PlatformFlags(
                 isMaintenanceMode = KartFormatters.parseBooleanSetting(
@@ -946,94 +1130,138 @@ class KartRepository(
                     byKey[KEY_BUY_NOW_ENABLED]?.value,
                     default = lastKnownPlatformFlags?.buyNowEnabled ?: true
                 ),
-                promoBoostRate = parseDoubleSetting(byKey[KEY_PROMO_BOOST_RATE]?.value, 15.0),
-                promoFeaturedRate = parseDoubleSetting(byKey[KEY_PROMO_FEATURED_RATE]?.value, 35.0),
-                promoCampusAdRate = parseDoubleSetting(byKey[KEY_PROMO_CAMPUS_AD_RATE]?.value, 65.0)
+                promoDailyPrice = parseDoubleSetting(byKey[KEY_PROMO_DAILY_PRICE]?.value, 5.0),
+                promoWeeklyPrice = parseDoubleSetting(byKey[KEY_PROMO_WEEKLY_PRICE]?.value, 25.0),
+                promoFeaturedPrice = parseDoubleSetting(byKey[KEY_PROMO_FEATURED_PRICE]?.value, 50.0),
+                marketplaceServiceFee = parseDoubleSetting(byKey[KEY_MARKETPLACE_SERVICE_FEE]?.value, 2.0),
+                transactionFeeFixed = parseDoubleSetting(byKey[KEY_TRANSACTION_FEE_FIXED]?.value, 1.0),
+                transactionFeePercent = parseDoubleSetting(byKey[KEY_TRANSACTION_FEE_PERCENT]?.value, 0.0),
+                withdrawalFeeFlat = parseDoubleSetting(byKey[KEY_WITHDRAWAL_FEE_FLAT]?.value, 1.0),
+                minDepositAmount = parseDoubleSetting(byKey[KEY_MIN_DEPOSIT_AMOUNT]?.value, 10.0),
+                minWithdrawalAmount = parseDoubleSetting(byKey[KEY_MIN_WITHDRAWAL_AMOUNT]?.value, 10.0),
+                maxListingPrice = parseDoubleSetting(byKey[KEY_MAX_LISTING_PRICE]?.value, 50000.0),
+                supportEmail = parseStringSetting(byKey[KEY_PLATFORM_SUPPORT_EMAIL]?.value, "support@kart.com"),
+                whatsappSupportNumber = parseStringSetting(byKey[KEY_WHATSAPP_SUPPORT_NUMBER]?.value, "")
             )
             lastKnownPlatformFlags = parsed
+            platformFlagsFetchedAtMs = System.currentTimeMillis()
             parsed
         }.getOrElse { lastKnownPlatformFlags ?: PlatformFlags() }
     }
 
-    suspend fun isMaintenanceMode(): Boolean = fetchPlatformFlags().isMaintenanceMode
+    suspend fun isMaintenanceMode(forceRefresh: Boolean = false): Boolean =
+        fetchPlatformFlags(forceRefresh).isMaintenanceMode
 
-    suspend fun isBuyNowEnabled(): Boolean = fetchPlatformFlags().buyNowEnabled
+    suspend fun isBuyNowEnabled(forceRefresh: Boolean = false): Boolean =
+        fetchPlatformFlags(forceRefresh).buyNowEnabled
 
     suspend fun fetchProfileBundle(targetUserId: String, currentUserId: String?): ApiResult<ProfileBundle> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
-            val profile = supabaseApi.getProfiles(
-                mapOf("select" to "*", "id" to "eq.$targetUserId", "limit" to "1")
-            ).body()?.firstOrNull() ?: return ApiResult.Error("User profile not found.")
+            coroutineScope {
+                val profileDef = async(Dispatchers.IO) {
+                    supabaseApi.getProfiles(
+                        mapOf("select" to "*", "id" to "eq.$targetUserId", "limit" to "1")
+                    ).body()?.firstOrNull()
+                }
+                val listingsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getProducts(
+                            mapOf(
+                                "select" to "*",
+                                "seller_id" to "eq.$targetUserId",
+                                "order" to "created_at.desc",
+                                "limit" to "50"
+                            )
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val reviewsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        val rawReviews = supabaseApi.getReviews(
+                            mapOf(
+                                "select" to "*",
+                                "seller_id" to "eq.$targetUserId",
+                                "order" to "created_at.desc",
+                                "limit" to "50"
+                            )
+                        ).body().orEmpty()
+                        enrichReviewsWithProfiles(rawReviews)
+                    }.getOrDefault(emptyList())
+                }
+                val walletDef = async(Dispatchers.IO) {
+                    if (targetUserId == currentUserId) {
+                        runCatching {
+                            supabaseApi.getWallets(mapOf("select" to "balance", "user_id" to "eq.$targetUserId", "limit" to "1"))
+                                .body()?.firstOrNull()?.balance ?: 0.0
+                        }.getOrDefault(0.0)
+                    } else 0.0
+                }
+                val followStatsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        val rpcRes = supabaseApi.getFollowStats(mapOf("p_target_user_id" to targetUserId))
+                        if (rpcRes.isSuccessful && rpcRes.body() != null) {
+                            rpcRes.body()!!
+                        } else {
+                            FollowStatsRpc()
+                        }
+                    }.getOrDefault(FollowStatsRpc())
+                }
 
-            val listings = runCatching {
-                supabaseApi.getProducts(
-                    mapOf(
-                        "select" to "*",
-                        "seller_id" to "eq.$targetUserId",
-                        "order" to "created_at.desc"
+                val profile = profileDef.await() ?: return@coroutineScope ApiResult.Error("User profile not found.")
+                val followStats = followStatsDef.await()
+
+                ApiResult.Success(
+                    ProfileBundle(
+                        profile = profile,
+                        listings = listingsDef.await(),
+                        reviews = reviewsDef.await(),
+                        walletBalance = walletDef.await(),
+                        followersCount = followStats.followersCount,
+                        followingCount = followStats.followingCount,
+                        isFollowing = currentUserId != null && followStats.isFollowing
                     )
-                ).body().orEmpty()
-            }.getOrDefault(emptyList())
-
-            val reviews = runCatching {
-                val rawReviews = supabaseApi.getReviews(
-                    mapOf(
-                        "select" to "*",
-                        "seller_id" to "eq.$targetUserId",
-                        "order" to "created_at.desc"
-                    )
-                ).body().orEmpty()
-                enrichReviewsWithProfiles(rawReviews)
-            }.getOrDefault(emptyList())
-
-            val walletBalance = if (targetUserId == currentUserId) {
-                runCatching {
-                    supabaseApi.getWallets(mapOf("select" to "balance", "user_id" to "eq.$targetUserId", "limit" to "1"))
-                        .body()?.firstOrNull()?.balance ?: 0.0
-                }.getOrDefault(0.0)
-            } else 0.0
-
-            val followers = runCatching {
-                supabaseApi.getFollows(mapOf("select" to "follower_id", "following_id" to "eq.$targetUserId"))
-                    .body().orEmpty()
-            }.getOrDefault(emptyList())
-
-            val following = runCatching {
-                supabaseApi.getFollows(mapOf("select" to "following_id", "follower_id" to "eq.$targetUserId"))
-                    .body().orEmpty()
-            }.getOrDefault(emptyList())
-
-            ApiResult.Success(
-                ProfileBundle(
-                    profile = profile,
-                    listings = listings,
-                    reviews = reviews,
-                    walletBalance = walletBalance,
-                    followersCount = followers.size,
-                    followingCount = following.size,
-                    isFollowing = currentUserId != null && followers.any { it.followerId == currentUserId }
                 )
-            )
+            }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load profile.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load profile."))
         }
     }
 
     suspend fun fetchWishlist(userId: String): ApiResult<List<WishlistRow>> {
+        val cursorApi = kartCursorApi
+        if (cursorApi != null) {
+            val cursorRes = runCatching { cursorApi.getWishlist(include = "products", limit = 50) }.getOrNull()
+            if (cursorRes != null) {
+                val rows = cursorRes.items.map { item ->
+                    if (item.userId.isNullOrBlank()) item.copy(userId = userId) else item
+                }
+                return ApiResult.Success(rows)
+            }
+        }
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
             val res = supabaseApi.getWishlist(
                 mapOf(
                     "select" to "*,product:products(*,seller:profiles(id,display_name,avatar_url,is_verified))",
                     "user_id" to "eq.$userId",
-                    "order" to "created_at.desc"
+                    "order" to "created_at.desc",
+                    "limit" to "100"
                 )
             )
             if (res.isSuccessful) ApiResult.Success(res.body().orEmpty())
-            else ApiResult.Error("Failed to fetch wishlist (${res.code()})")
+            else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Failed to fetch wishlist"))
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error loading wishlist.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error loading wishlist."))
+        }
+    }
+
+    suspend fun fetchWishlistPage(cursor: String? = null, limit: Int = 20): ApiResult<WishlistCursorResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            ApiResult.Success(api.getWishlist(include = "products", cursor = cursor, limit = limit))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load wishlist page."))
         }
     }
 
@@ -1045,9 +1273,9 @@ class KartRepository(
                 kartWebApi.addToWishlist(mapOf("productId" to productId))
             }
             if (res.isSuccessful) ApiResult.Success(!currentlySaved)
-            else ApiResult.Error("Could not update wishlist (${res.code()}).")
+            else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Could not update wishlist."))
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Wishlist update failed.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Wishlist update failed."))
         }
     }
 
@@ -1094,7 +1322,7 @@ class KartRepository(
                 ApiResult.Success(following)
             } else ApiResult.Error("Could not update follow status.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Follow toggle failed.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Follow toggle failed."))
         }
     }
 
@@ -1102,18 +1330,36 @@ class KartRepository(
         if (!hasSupabaseKey()) return emptyList()
         return runCatching {
             val rows = if (type == "followers") {
-                supabaseApi.getFollows(mapOf("select" to "follower_id", "following_id" to "eq.$userId")).body().orEmpty()
-                    .mapNotNull { it.followerId }
+                supabaseApi.getFollows(
+                    mapOf("select" to "follower_id", "following_id" to "eq.$userId", "limit" to "50")
+                ).body().orEmpty().mapNotNull { it.followerId }
             } else {
-                supabaseApi.getFollows(mapOf("select" to "following_id", "follower_id" to "eq.$userId")).body().orEmpty()
-                    .mapNotNull { it.followingId }
-            }
+                supabaseApi.getFollows(
+                    mapOf("select" to "following_id", "follower_id" to "eq.$userId", "limit" to "50")
+                ).body().orEmpty().mapNotNull { it.followingId }
+            }.distinct()
             if (rows.isEmpty()) emptyList()
-            else supabaseApi.getProfiles(mapOf("select" to "*", "id" to "in.(${rows.joinToString(",")})")).body().orEmpty()
+            else rows.chunked(50).flatMap { chunk ->
+                supabaseApi.getProfiles(
+                    mapOf("select" to "*", "id" to "in.(${chunk.joinToString(",")})")
+                ).body().orEmpty()
+            }
         }.getOrDefault(emptyList())
     }
 
     suspend fun fetchNotifications(userId: String): ApiResult<List<NotificationItem>> {
+        val cursorApi = kartCursorApi
+        if (cursorApi != null) {
+            val cursorRes = runCatching { cursorApi.getNotifications(limit = 50) }.getOrNull()
+            if (cursorRes != null && cursorRes.error.isNullOrBlank()) {
+                val normalized = cursorRes.notifications.map { item ->
+                    if (item.link.isNullOrBlank() && !item.relatedOrderId.isNullOrBlank()) {
+                        item.copy(link = "/orders/${item.relatedOrderId}")
+                    } else item
+                }
+                return ApiResult.Success(normalized)
+            }
+        }
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
             val res = supabaseApi.getNotifications(
@@ -1122,7 +1368,34 @@ class KartRepository(
             if (res.isSuccessful) ApiResult.Success(res.body().orEmpty())
             else ApiResult.Error("Failed to load notifications.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error loading notifications.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error loading notifications."))
+        }
+    }
+
+    suspend fun fetchNotificationsPage(
+        cursor: String? = null,
+        limit: Int = 25,
+        unreadOnly: Boolean = false
+    ): ApiResult<NotificationsCursorResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            ApiResult.Success(api.getNotifications(cursor = cursor, limit = limit, unreadOnly = unreadOnly))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load notifications page."))
+        }
+    }
+
+    suspend fun fetchUnreadSummary(userId: String): Pair<Int, Int> {
+        if (!hasSupabaseKey() || userId.isBlank()) return 0 to 0
+        val rpcRes = runCatching { supabaseApi.getUnreadSummary() }.getOrNull()
+        val body = rpcRes?.body()
+        if (rpcRes?.isSuccessful == true && body != null) {
+            return body.unreadNotifications to body.unreadMessages
+        }
+        return coroutineScope {
+            val notifsDef = async(Dispatchers.IO) { fetchUnreadNotificationsCount(userId) }
+            val msgsDef = async(Dispatchers.IO) { fetchUnreadMessagesCount() }
+            notifsDef.await() to msgsDef.await()
         }
     }
 
@@ -1147,7 +1420,7 @@ class KartRepository(
             if (res.isSuccessful) ApiResult.Success(Unit)
             else ApiResult.Error("Could not mark notification as read.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error updating notification.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error updating notification."))
         }
     }
 
@@ -1160,9 +1433,9 @@ class KartRepository(
                 body = mapOf("is_read" to true)
             )
             if (res.isSuccessful) ApiResult.Success(Unit)
-            else ApiResult.Error("Could not mark notifications as read (${res.code()}).")
+            else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Could not mark notifications as read."))
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error updating notifications.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error updating notifications."))
         }
     }
 
@@ -1171,12 +1444,22 @@ class KartRepository(
             val res = kartWebApi.deleteNotification(mapOf("notificationId" to notificationId))
             if (res.isSuccessful) ApiResult.Success(Unit) else ApiResult.Error("Could not delete notification.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error deleting notification.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error deleting notification."))
         }
     }
 
     // --- Orders & Checkout ---
     suspend fun fetchOrders(userId: String, asSeller: Boolean = false): ApiResult<List<Order>> {
+        val role = if (asSeller) "seller" else "buyer"
+        val cursorApi = kartCursorApi
+        if (cursorApi != null) {
+            val cursorRes = runCatching { cursorApi.getOrders(role = role, limit = 50) }.getOrNull()
+            if (cursorRes != null && cursorRes.error.isNullOrBlank()) {
+                val orders = cursorRes.orders
+                cacheOrdersLocally(role, orders)
+                return ApiResult.Success(orders)
+            }
+        }
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
             val filterCol = if (asSeller) "seller_id" else "buyer_id"
@@ -1184,20 +1467,147 @@ class KartRepository(
                 mapOf(
                     "select" to "*,product:products(id,title,images,image_url),seller:profiles!orders_seller_id_profiles_fkey(id,display_name,email,is_verified,avatar_url),buyer:profiles!orders_buyer_id_profiles_fkey(id,display_name,email,is_verified,avatar_url)",
                     filterCol to "eq.$userId",
-                    "order" to "created_at.desc"
+                    "order" to "created_at.desc",
+                    "limit" to "100"
                 )
             )
-            if (res.isSuccessful) ApiResult.Success(res.body().orEmpty())
-            else {
+            if (res.isSuccessful) {
+                val orders = res.body().orEmpty()
+                cacheOrdersLocally(role, orders)
+                ApiResult.Success(orders)
+            } else {
                 // Fallback without explicit foreign key hint
                 val fallback = supabaseApi.getOrders(
-                    mapOf("select" to "*,product:products(id,title,images,image_url)", filterCol to "eq.$userId", "order" to "created_at.desc")
+                    mapOf(
+                        "select" to "*,product:products(id,title,images,image_url)",
+                        filterCol to "eq.$userId",
+                        "order" to "created_at.desc",
+                        "limit" to "100"
+                    )
                 )
-                if (fallback.isSuccessful) ApiResult.Success(fallback.body().orEmpty())
-                else ApiResult.Error("Failed to load orders (${fallback.code()}).")
+                if (fallback.isSuccessful) {
+                    val orders = fallback.body().orEmpty()
+                    cacheOrdersLocally(role, orders)
+                    ApiResult.Success(orders)
+                } else ApiResult.Error(KartErrorFormatter.fromHttpStatus(fallback.code(), fallback = "Failed to load orders."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error loading orders.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error loading orders."))
+        }
+    }
+
+    private suspend fun cacheOrdersLocally(role: String, orders: List<Order>) {
+        val db = runCatching { databaseProvider?.invoke() }.getOrNull() ?: return
+        runCatching {
+            val entities = orders.map { order ->
+                OrderEntity(
+                    id = order.id,
+                    role = role,
+                    productId = order.productId ?: order.product?.id,
+                    productTitle = order.product?.title,
+                    productImageUrl = order.product?.primaryImage?.let {
+                        KartFormatters.buildOptimizedImageUrl(it, KartFormatters.ImageVariant.CARD).ifBlank { it }
+                    },
+                    totalAmount = order.totalAmount ?: 0.0,
+                    status = order.status.orEmpty(),
+                    escrowStatus = order.escrowStatus,
+                    createdAt = order.createdAt.orEmpty()
+                )
+            }
+            db.orderDao().insertAll(entities)
+        }
+    }
+
+    suspend fun fetchOrdersPage(
+        cursor: String? = null,
+        limit: Int = 20,
+        role: String = "buyer",
+        status: String? = null
+    ): ApiResult<OrdersCursorResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            ApiResult.Success(api.getOrders(cursor = cursor, limit = limit, role = role, status = status))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load orders page."))
+        }
+    }
+
+    suspend fun fetchReviewsPage(
+        productId: String? = null,
+        sellerId: String? = null,
+        cursor: String? = null,
+        limit: Int = 20
+    ): ApiResult<ReviewsCursorResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            val res = api.getReviews(productId = productId, sellerId = sellerId, cursor = cursor, limit = limit)
+            val normalized = res.copy(
+                reviews = res.reviews.map { rev ->
+                    if (rev.reviewer == null && rev.buyer != null) rev.copy(reviewer = rev.buyer) else rev
+                }
+            )
+            ApiResult.Success(normalized)
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load reviews."))
+        }
+    }
+
+    suspend fun fetchConversationsPage(cursor: String? = null, limit: Int = 25): ApiResult<ConversationsCursorResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            ApiResult.Success(api.getConversations(cursor = cursor, limit = limit))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load conversations page."))
+        }
+    }
+
+    suspend fun fetchConversationMessagesPage(
+        conversationId: String,
+        cursor: String? = null,
+        limit: Int = 50
+    ): ApiResult<MessagesCursorResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            ApiResult.Success(api.getConversationMessages(conversationId = conversationId, cursor = cursor, limit = limit))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load messages page."))
+        }
+    }
+
+    suspend fun fetchPresenceBatch(userIds: List<String>): PresenceBatchResponse? {
+        val api = kartCursorApi ?: return null
+        val csv = userIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct().take(40).joinToString(",")
+        if (csv.isEmpty()) return PresenceBatchResponse()
+        return runCatching { api.getPresenceBatch(csv) }.getOrNull()
+    }
+
+    suspend fun touchPresence() {
+        val api = kartCursorApi ?: return
+        runCatching { api.touchPresence() }
+    }
+
+    suspend fun fetchAdminConsolePage(
+        resource: String,
+        cursor: String? = null,
+        limit: Int = 20,
+        search: String? = null,
+        status: String? = null,
+        includeKpis: Boolean = false
+    ): ApiResult<AdminConsolePageResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            ApiResult.Success(
+                api.getAdminConsolePage(
+                    resource = resource,
+                    cursor = cursor,
+                    limit = limit,
+                    q = search,
+                    status = status,
+                    includeKpis = includeKpis
+                )
+            )
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load admin console page."))
         }
     }
 
@@ -1246,7 +1656,7 @@ class KartRepository(
                 )
             )
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load order.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load order."))
         }
     }
 
@@ -1271,10 +1681,10 @@ class KartRepository(
                 if (authUrl.isNotBlank()) ApiResult.Success(orderId to authUrl)
                 else ApiResult.Error(body["error"]?.toString() ?: "Payment URL missing from response.")
             } else {
-                ApiResult.Error(extractHttpErrorMessage(res) ?: "Checkout failed (${res.code()}).")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Checkout failed."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Unable to initialize Paystack checkout.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Unable to initialize Paystack checkout."))
         }
     }
 
@@ -1287,10 +1697,10 @@ class KartRepository(
                 val orderId = orderMap?.get("id")?.toString() ?: body["orderId"]?.toString().orEmpty()
                 ApiResult.Success(orderId)
             } else {
-                ApiResult.Error(extractHttpErrorMessage(res) ?: "Wallet payment failed (${res.code()}). Check your available balance.")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Wallet payment failed. Check your available balance."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Wallet checkout error.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Wallet checkout error."))
         }
     }
 
@@ -1324,10 +1734,10 @@ class KartRepository(
                     ApiResult.Error("QR token missing from server response.")
                 }
             } else {
-                ApiResult.Error(extractHttpErrorMessage(res) ?: "Could not generate handover QR (${res.code()}).")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Could not generate handover QR."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Network error while generating handover QR.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Network error while generating handover QR."))
         }
     }
 
@@ -1379,10 +1789,10 @@ class KartRepository(
                 val mergedIds = ids + profiles.map { it.id }
                 ApiResult.Success(mergedIds to profiles)
             } else {
-                ApiResult.Error(extractHttpErrorMessage(res) ?: "Could not load blocked users (${res.code()}).")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Could not load blocked users."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Network error while loading blocked users.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Network error while loading blocked users."))
         }
     }
 
@@ -1461,15 +1871,33 @@ class KartRepository(
     suspend fun fetchConversations(userId: String): ApiResult<List<EnrichedConversation>> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
+            val inboxRpc = runCatching {
+                supabaseApi.getUserInbox(mapOf("p_limit" to 40))
+            }.getOrNull()
+            if (inboxRpc?.isSuccessful == true && inboxRpc.body() != null) {
+                val mapped = inboxRpc.body().orEmpty().map { item ->
+                    EnrichedConversation(
+                        id = item.id,
+                        otherUser = item.otherUser ?: Profile(id = "", displayName = "Campus User"),
+                        product = null,
+                        lastMessage = item.lastMessage,
+                        unreadCount = item.unreadCount,
+                        updatedAt = item.updatedAt
+                    )
+                }
+                return ApiResult.Success(mapped)
+            }
+
             val convsRes = supabaseApi.getConversations(
                 mapOf(
                     "select" to "*",
                     "participants" to "cs.{$userId}",
-                    "order" to "updated_at.desc"
+                    "order" to "updated_at.desc",
+                    "limit" to "40"
                 )
             )
             if (!convsRes.isSuccessful) {
-                return ApiResult.Error("Failed to load conversations (${convsRes.code()}).")
+                return ApiResult.Error(KartErrorFormatter.fromHttpStatus(convsRes.code(), fallback = "Failed to load conversations."))
             }
             val convs = convsRes.body().orEmpty()
             if (convs.isEmpty()) return ApiResult.Success(emptyList())
@@ -1480,15 +1908,19 @@ class KartRepository(
 
             val profilesMap = if (otherIds.isNotEmpty()) {
                 runCatching {
-                    supabaseApi.getProfiles(mapOf("select" to "*", "id" to "in.(${otherIds.joinToString(",")})"))
-                        .body().orEmpty().associateBy { it.id }
+                    otherIds.chunked(50).flatMap { chunk ->
+                        supabaseApi.getProfiles(mapOf("select" to "*", "id" to "in.(${chunk.joinToString(",")})"))
+                            .body().orEmpty()
+                    }.associateBy { it.id }
                 }.getOrDefault(emptyMap())
             } else emptyMap()
 
             val productsMap = if (productIds.isNotEmpty()) {
                 runCatching {
-                    supabaseApi.getProducts(mapOf("select" to "*", "id" to "in.(${productIds.joinToString(",")})"))
-                        .body().orEmpty().associateBy { it.id }
+                    productIds.chunked(50).flatMap { chunk ->
+                        supabaseApi.getProducts(mapOf("select" to "*", "id" to "in.(${chunk.joinToString(",")})"))
+                            .body().orEmpty()
+                    }.associateBy { it.id }
                 }.getOrDefault(emptyMap())
             } else emptyMap()
 
@@ -1498,7 +1930,7 @@ class KartRepository(
                         "select" to "*",
                         "conversation_id" to "in.(${convIds.joinToString(",")})",
                         "order" to "created_at.desc",
-                        "limit" to "500"
+                        "limit" to "200"
                     )
                 ).body().orEmpty()
             }.getOrDefault(emptyList())
@@ -1510,7 +1942,7 @@ class KartRepository(
                         "conversation_id" to "in.(${convIds.joinToString(",")})",
                         "sender_id" to "neq.$userId",
                         "is_read" to "eq.false",
-                        "limit" to "1000"
+                        "limit" to "200"
                     )
                 ).body().orEmpty()
             }.getOrNull()
@@ -1529,11 +1961,11 @@ class KartRepository(
                 }
             }
 
-            // Backfill lastMessage for any conversation outside the 500-message window
+            // Backfill lastMessage for any conversation outside the 200-message window
             val missingLastConvIds = convIds.filter { it !in lastByConv }
             if (missingLastConvIds.isNotEmpty()) {
                 coroutineScope {
-                    missingLastConvIds.take(25).map { cid ->
+                    missingLastConvIds.take(5).map { cid ->
                         async {
                             cid to runCatching {
                                 supabaseApi.getMessages(
@@ -1565,7 +1997,7 @@ class KartRepository(
             }
             ApiResult.Success(enriched)
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load conversations.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load conversations."))
         }
     }
 
@@ -1598,7 +2030,7 @@ class KartRepository(
                 ApiResult.Success(rows)
             } else ApiResult.Error("Could not load messages.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error loading messages.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error loading messages."))
         }
     }
 
@@ -1658,7 +2090,7 @@ class KartRepository(
                         ?: refetched.firstOrNull()?.id
                     if (!matchId.isNullOrBlank()) return ApiResult.Success(matchId)
                 } else {
-                    lastError = extractHttpErrorMessage(created) ?: "Could not start conversation (${created.code()})."
+                    lastError = KartErrorFormatter.fromHttpStatus(created.code(), extractHttpErrorMessage(created), "Could not start conversation.")
                     // If the database enforces one conversation per buyer/seller pair, reuse the existing thread
                     if (existingList.isNotEmpty()) {
                         return ApiResult.Success(existingList.first().id)
@@ -1674,7 +2106,7 @@ class KartRepository(
                 ApiResult.Error(lastError ?: "Could not start conversation.")
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error starting chat.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error starting chat."))
         }
     }
 
@@ -1720,7 +2152,7 @@ class KartRepository(
                 ApiResult.Success(sent)
             } else ApiResult.Error("Failed to send message.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Message failed to send.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Message failed to send."))
         }
     }
 
@@ -1735,20 +2167,58 @@ class KartRepository(
 
     // --- Wallet & Subscriptions ---
     suspend fun fetchWallet(userId: String): ApiResult<Wallet> {
+        val cursorApi = kartCursorApi
+        if (cursorApi != null) {
+            val cursorRes = runCatching { cursorApi.getWalletTransactions(limit = 50) }.getOrNull()
+            if (cursorRes != null && cursorRes.error.isNullOrBlank() && cursorRes.wallet != null) {
+                val txns = cursorRes.transactions.map { tx -> tx.copy(type = tx.resolvedType) }
+                return ApiResult.Success(cursorRes.wallet.copy(userId = cursorRes.wallet.userId ?: userId, transactions = txns))
+            }
+        }
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
             val res = supabaseApi.getWallets(
                 mapOf(
-                    "select" to "*,wallet_transactions(*,order:orders(id,product:products(title)))",
+                    "select" to "*",
                     "user_id" to "eq.$userId",
                     "limit" to "1"
                 )
             )
             if (res.isSuccessful) {
-                ApiResult.Success(res.body()?.firstOrNull() ?: Wallet(userId = userId))
+                val wallet = res.body()?.firstOrNull() ?: return ApiResult.Success(Wallet(userId = userId))
+                val walletId = wallet.id
+                val txns = if (!walletId.isNullOrBlank()) {
+                    runCatching {
+                        supabaseApi.getWalletTransactions(
+                            mapOf(
+                                "select" to "*,order:orders(id,product:products(title))",
+                                "wallet_id" to "eq.$walletId",
+                                "order" to "created_at.desc",
+                                "limit" to "100"
+                            )
+                        ).body().orEmpty().map { tx -> tx.copy(type = tx.resolvedType) }
+                    }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
+                ApiResult.Success(wallet.copy(transactions = txns))
             } else ApiResult.Error("Failed to load wallet.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error loading wallet.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error loading wallet."))
+        }
+    }
+
+    suspend fun fetchWalletTransactionsPage(
+        cursor: String? = null,
+        limit: Int = 25,
+        type: String? = null
+    ): ApiResult<WalletTransactionsCursorResponse> {
+        val api = kartCursorApi ?: return ApiResult.Error("Cursor API is unavailable.")
+        return try {
+            val res = api.getWalletTransactions(cursor = cursor, limit = limit, type = type)
+            ApiResult.Success(res.copy(transactions = res.transactions.map { it.copy(type = it.resolvedType) }))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load wallet transactions page."))
         }
     }
 
@@ -1760,7 +2230,7 @@ class KartRepository(
             if (res.isSuccessful && !url.isNullOrBlank()) ApiResult.Success(url)
             else ApiResult.Error(res.body()?.get("error")?.toString() ?: "Could not initialize deposit.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Deposit initiation failed.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Deposit initiation failed."))
         }
     }
 
@@ -1785,20 +2255,20 @@ class KartRepository(
         return try {
             val plansRes = supabaseApi.getSubscriptionPlans(mapOf("select" to "*", "order" to "duration_months.asc"))
             if (!plansRes.isSuccessful) {
-                return ApiResult.Error("Failed to load subscription plans (${plansRes.code()}).")
+                return ApiResult.Error(KartErrorFormatter.fromHttpStatus(plansRes.code(), fallback = "Failed to load subscription plans."))
             }
             val plans = plansRes.body().orEmpty()
             val subsRes = supabaseApi.getSubscriptions(
                 mapOf("select" to "*,plan:subscription_plans(*)", "user_id" to "eq.$userId", "order" to "created_at.desc", "limit" to "5")
             )
             if (!subsRes.isSuccessful) {
-                return ApiResult.Error("Failed to load subscriptions (${subsRes.code()}).")
+                return ApiResult.Error(KartErrorFormatter.fromHttpStatus(subsRes.code(), fallback = "Failed to load subscriptions."))
             }
             val subs = subsRes.body().orEmpty()
             val activeSub = subs.firstOrNull { KartFormatters.isActiveSubscription(it) }
             ApiResult.Success(plans to activeSub)
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load subscription plans.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load subscription plans."))
         }
     }
 
@@ -1816,10 +2286,10 @@ class KartRepository(
                 // Free plans activate immediately without returning a Paystack authorization_url
                 ApiResult.Success(url)
             } else {
-                ApiResult.Error(extractHttpErrorMessage(res) ?: "Subscription checkout failed (${res.code()}).")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Subscription checkout failed."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Subscription error.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Subscription error."))
         }
     }
 
@@ -1831,23 +2301,30 @@ class KartRepository(
     suspend fun fetchSellerHub(userId: String): ApiResult<SellerHubBundle> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
-            val listingsRes = supabaseApi.getProducts(mapOf("select" to "*", "seller_id" to "eq.$userId", "order" to "created_at.desc"))
+            val listingsRes = supabaseApi.getProducts(
+                mapOf("select" to "*", "seller_id" to "eq.$userId", "order" to "created_at.desc", "limit" to "100")
+            )
             if (!listingsRes.isSuccessful) {
-                return ApiResult.Error("Failed to load seller listings (${listingsRes.code()}).")
+                return ApiResult.Error(KartErrorFormatter.fromHttpStatus(listingsRes.code(), fallback = "Failed to load seller listings."))
             }
             val listings = listingsRes.body().orEmpty()
 
             val ordersRes = supabaseApi.getOrders(
-                mapOf("select" to "*,product:products(id,title,images,image_url)", "seller_id" to "eq.$userId", "order" to "created_at.desc")
+                mapOf(
+                    "select" to "*,product:products(id,title,images,image_url)",
+                    "seller_id" to "eq.$userId",
+                    "order" to "created_at.desc",
+                    "limit" to "100"
+                )
             )
             if (!ordersRes.isSuccessful) {
-                return ApiResult.Error("Failed to load seller orders (${ordersRes.code()}).")
+                return ApiResult.Error(KartErrorFormatter.fromHttpStatus(ordersRes.code(), fallback = "Failed to load seller orders."))
             }
             val orders = ordersRes.body().orEmpty()
 
             val promos = runCatching {
                 supabaseApi.getAdvertisements(
-                    mapOf("select" to "*,product:products(*)", "seller_id" to "eq.$userId", "order" to "created_at.desc")
+                    mapOf("select" to "*,product:products(*)", "seller_id" to "eq.$userId", "order" to "created_at.desc", "limit" to "100")
                 ).body().orEmpty()
             }.getOrDefault(emptyList())
 
@@ -1900,7 +2377,7 @@ class KartRepository(
                 )
             )
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load Seller Hub.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load Seller Hub."))
         }
     }
 
@@ -1956,11 +2433,35 @@ class KartRepository(
         return null
     }
 
+    private suspend fun tryDirectR2Upload(
+        bytes: ByteArray,
+        bucket: String,
+        mime: String,
+        conversationId: String?
+    ): String? {
+        val uploader = directR2Uploader ?: return null
+        val presignBucket = if (bucket == "chat-media") "chat-attachments" else bucket
+        if (presignBucket == "chat-attachments" && conversationId.isNullOrBlank()) {
+            return null
+        }
+        return runCatching {
+            uploader.uploadBytes(
+                bytes = bytes,
+                bucket = presignBucket,
+                mimeType = mime,
+                conversationId = conversationId
+            )
+        }.getOrNull()?.publicUrl?.takeIf { url ->
+            url.isNotBlank() && KartFormatters.isTrustedMediaUrl(url)
+        }
+    }
+
     suspend fun uploadImageUri(
         contentResolver: ContentResolver,
         uri: Uri,
         bucket: String = "products",
-        isPrivate: Boolean = false
+        isPrivate: Boolean = false,
+        conversationId: String? = null
     ): ApiResult<String> {
         return try {
             val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -1969,21 +2470,33 @@ class KartRepository(
             if (bytes.isEmpty() || !isValidImageMagic(bytes)) {
                 return ApiResult.Error("Please select a valid JPEG, PNG, or WebP image.")
             }
-            val mime = contentResolver.getType(uri)?.takeIf {
+            val rawMime = contentResolver.getType(uri)?.takeIf {
                 it in setOf("image/jpeg", "image/jpg", "image/png", "image/webp")
             } ?: "image/jpeg"
+            val compressed = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                if (bucket == "verifications") compressImageBytes(bytes, maxDimensionPx = 1800, jpegQuality = 88)
+                else compressImageBytes(bytes, maxDimensionPx = 1440, jpegQuality = 82)
+            }
+            val uploadBytes = compressed ?: bytes
+            val mime = if (compressed != null) "image/jpeg" else rawMime
             val ext = when {
                 mime.contains("png") -> "png"
                 mime.contains("webp") -> "webp"
                 else -> "jpg"
             }
+
+            // Primary path: direct-to-R2 presigned PUT (bypasses Vercel serverless payload bottleneck)
+            tryDirectR2Upload(uploadBytes, bucket, mime, conversationId)?.let { publicUrl ->
+                return ApiResult.Success(publicUrl)
+            }
+
             val uid = sessionStore.currentSession().userId
             val filename = "${UUID.randomUUID()}.$ext"
             val scopedPath = if (uid.isNotBlank()) "$uid/$filename" else filename
 
-            // For private KYC / chat uploads, try private Supabase bucket + signed URL first
+            // For private KYC / chat uploads, try private Supabase bucket + signed URL next
             if (isPrivate) {
-                tryPrivateUploadAndSign(bucket, scopedPath, bytes, mime)?.let { signedUrl ->
+                tryPrivateUploadAndSign(bucket, scopedPath, uploadBytes, mime)?.let { signedUrl ->
                     return ApiResult.Success(signedUrl)
                 }
             }
@@ -1992,7 +2505,7 @@ class KartRepository(
             val part = MultipartBody.Part.createFormData(
                 "file",
                 filename,
-                bytes.toRequestBody(mime.toMediaTypeOrNull())
+                uploadBytes.toRequestBody(mime.toMediaTypeOrNull())
             )
             val webUpload = runCatching { kartWebApi.uploadImage(part) }.getOrNull()
             val webUrl = webUpload?.body()?.get("url")?.toString()
@@ -2018,23 +2531,24 @@ class KartRepository(
             val storageRes = supabaseApi.uploadToStorage(
                 bucket = bucket,
                 path = storagePath,
-                body = bytes.toRequestBody(mime.toMediaTypeOrNull())
+                body = uploadBytes.toRequestBody(mime.toMediaTypeOrNull())
             )
             if (storageRes.isSuccessful) {
                 val publicUrl = "${BuildConfig.SUPABASE_URL.trimEnd('/')}/storage/v1/object/public/$bucket/$storagePath"
                 ApiResult.Success(publicUrl)
             } else {
-                ApiResult.Error("Image upload failed (${storageRes.code()}).")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(storageRes.code(), fallback = "Image upload failed."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Upload failed.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Upload failed."))
         }
     }
 
     suspend fun uploadAudioFile(
         file: java.io.File,
         bucket: String = "chat-media",
-        isPrivate: Boolean = true
+        isPrivate: Boolean = true,
+        conversationId: String? = null
     ): ApiResult<String> {
         return try {
             val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -2045,6 +2559,11 @@ class KartRepository(
             if (bytes == null) return ApiResult.Error("Recording was empty.")
             if (bytes.isEmpty()) return ApiResult.Error("Voice recording exceeds the 5 MB limit.")
             val mime = "audio/mp4"
+
+            tryDirectR2Upload(bytes, bucket, mime, conversationId)?.let { publicUrl ->
+                return ApiResult.Success(publicUrl)
+            }
+
             val uid = sessionStore.currentSession().userId
             val filename = if (uid.isNotBlank()) "voice/$uid/${UUID.randomUUID()}.m4a" else "voice/${UUID.randomUUID()}.m4a"
 
@@ -2083,7 +2602,7 @@ class KartRepository(
             }
             ApiResult.Error("Could not upload voice message.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Voice upload failed.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Voice upload failed."))
         }
     }
 
@@ -2152,9 +2671,9 @@ class KartRepository(
             val res = supabaseApi.createProduct(body = payload)
             val created = res.body()?.firstOrNull()
             if (res.isSuccessful && created != null) ApiResult.Success(created)
-            else ApiResult.Error("Could not publish listing (${res.code()}).")
+            else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Could not publish listing."))
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to create listing.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to create listing."))
         }
     }
 
@@ -2223,9 +2742,9 @@ class KartRepository(
             )
             val updated = res.body()?.firstOrNull()
             if (res.isSuccessful && updated != null) ApiResult.Success(updated)
-            else ApiResult.Error("Failed to update listing (${res.code()}).")
+            else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Failed to update listing."))
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error updating listing.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error updating listing."))
         }
     }
 
@@ -2244,11 +2763,11 @@ class KartRepository(
             )
             if (res.isSuccessful) ApiResult.Success(Unit) else ApiResult.Error("Could not delete listing.")
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Delete error.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Delete error."))
         }
     }
 
-    suspend fun createPromotion(productId: String, adType: String, durationDays: Int): ApiResult<String> {
+    suspend fun createPromotion(productId: String, tierId: String, amount: Double): ApiResult<String> {
         val currentSession = sessionStore.currentSession()
         if (!currentSession.isLoggedIn) return ApiResult.Error("Please sign in to promote a listing.")
         if (hasSupabaseKey()) {
@@ -2261,25 +2780,39 @@ class KartRepository(
             if (!listing.isActiveListing || listing.isOutOfStock) {
                 return ApiResult.Error("Only active, in-stock listings can be promoted.")
             }
-            if (hasActivePromotionForProduct(productId)) {
-                return ApiResult.Error("This listing already has an active promotion campaign.")
+            if (amount <= 0.0 && hasActivePromotionForProduct(productId)) {
+                return ApiResult.Error("This listing already has an active free promotion.")
             }
         }
         return try {
+            val normalizedTier = when (tierId.trim().lowercase(Locale.US)) {
+                "daily", "weekly", "featured" -> tierId.trim().lowercase(Locale.US)
+                else -> "daily"
+            }
             val res = kartWebApi.createPromotion(
-                mapOf("productId" to productId, "adType" to adType, "durationDays" to durationDays, "isApp" to true)
+                mapOf(
+                    "productId" to productId,
+                    "tierId" to normalizedTier,
+                    "amount" to amount.coerceAtLeast(0.0),
+                    "isApp" to true
+                )
             )
             if (res.isSuccessful) {
                 val body = res.body()
+                if (body?.get("redirect_to_success") == true) {
+                    return ApiResult.Success("")
+                }
                 val nested = body?.get("data") as? Map<*, *>
                 val url = body?.get("authorization_url")?.toString()
                     ?: nested?.get("authorization_url")?.toString()
                     ?: ""
                 if (url.isNotBlank()) ApiResult.Success(url)
                 else ApiResult.Error("Promotion payment URL was not returned.")
-            } else ApiResult.Error("Could not create promotion (${res.code()}).")
+            } else {
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Could not create promotion."))
+            }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Promotion error.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Promotion error."))
         }
     }
 
@@ -2299,7 +2832,7 @@ class KartRepository(
             val parsed = errBody?.let {
                 runCatching { org.json.JSONObject(it).optString("error").ifBlank { null } }.getOrNull()
             }
-            return ApiResult.Error(parsed ?: "Profile update failed (${webRes.code()}).")
+            return ApiResult.Error(KartErrorFormatter.fromHttpStatus(webRes.code(), parsed, "Profile update failed."))
         }
 
         // Fallback to PostgREST strictly with allowlisted non-privileged fields
@@ -2307,9 +2840,9 @@ class KartRepository(
             val res = supabaseApi.updateProfile(idFilter = "eq.$userId", body = sanitized)
             val updated = res.body()?.firstOrNull()
             if (res.isSuccessful && updated != null) ApiResult.Success(updated)
-            else ApiResult.Error("Profile update failed (${res.code()}).")
+            else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Profile update failed."))
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Error updating profile.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Error updating profile."))
         }
     }
 
@@ -2355,7 +2888,7 @@ class KartRepository(
                 ApiResult.Error("Unable to check Delivery PIN status.")
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Unable to check Delivery PIN status.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Unable to check Delivery PIN status."))
         }
     }
 
@@ -2448,16 +2981,24 @@ class KartRepository(
         kartWebApi.requestAccountDeletion(mapOf("reason" to reason))
     }
 
-    suspend fun fetchCampuses(): List<String> {
+    suspend fun fetchCampuses(forceRefresh: Boolean = false): List<String> {
         if (!hasSupabaseKey()) return KartGhanaCampuses
+        val now = System.currentTimeMillis()
+        val cached = cachedCampuses
+        if (!forceRefresh && !cached.isNullOrEmpty() && (now - campusesFetchedAtMs) < 600_000L) {
+            return cached
+        }
         return runCatching {
             val rows = supabaseApi.getCampuses(mapOf("select" to "name,abbreviation", "order" to "name.asc"))
                 .body().orEmpty()
             if (rows.isNotEmpty()) {
                 KartFormatters.registerCampusAbbreviations(rows)
             }
-            rows.map { it.name }.ifEmpty { KartGhanaCampuses }
-        }.getOrDefault(KartGhanaCampuses)
+            val resolved = rows.map { it.name }.ifEmpty { KartGhanaCampuses }
+            cachedCampuses = resolved
+            campusesFetchedAtMs = System.currentTimeMillis()
+            resolved
+        }.getOrDefault(cached ?: KartGhanaCampuses)
     }
 
     // --- Push Notifications (FCM Device Tokens) ---
@@ -2498,132 +3039,221 @@ class KartRepository(
         cachedAdminFetchedAtMs = 0L
     }
 
-    private suspend fun <T> fetchAllPages(
-        pageSize: Int = 1000,
-        failOnError: Boolean = false,
-        fetchPage: suspend (offset: Int, limit: Int) -> List<T>
-    ): List<T> {
-        val all = mutableListOf<T>()
-        var offset = 0
-        while (true) {
-            val batch = if (failOnError) {
-                fetchPage(offset, pageSize)
-            } else {
-                runCatching { fetchPage(offset, pageSize) }.getOrDefault(emptyList())
-            }
-            all.addAll(batch)
-            if (batch.size < pageSize) break
-            offset += pageSize
-        }
-        return all
-    }
-
     // --- Admin Console ---
     suspend fun fetchAdminBundle(): ApiResult<AdminDashboardBundle> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         return try {
-            val users = fetchAllPages(failOnError = true) { offset, limit ->
-                val res = supabaseApi.getProfiles(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit"))
-                if (!res.isSuccessful) throw IllegalStateException("Admin profiles query failed (${res.code()}).")
-                res.body().orEmpty()
-            }
-            val products = fetchAllPages(failOnError = true) { offset, limit ->
-                val res = supabaseApi.getProducts(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit"))
-                if (!res.isSuccessful) throw IllegalStateException("Admin products query failed (${res.code()}).")
-                res.body().orEmpty()
-            }
-            val orders = fetchAllPages(failOnError = true) { offset, limit ->
-                val res = supabaseApi.getOrders(mapOf("select" to "*,product:products(id,title,image_url)", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit"))
-                if (!res.isSuccessful) throw IllegalStateException("Admin orders query failed (${res.code()}).")
-                res.body().orEmpty()
-            }
-            val verifications = fetchAllPages { offset, limit ->
-                supabaseApi.getVerificationRequests(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val withdrawals = fetchAllPages { offset, limit ->
-                supabaseApi.getWithdrawalRequests(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val refunds = fetchAllPages { offset, limit ->
-                supabaseApi.getRefundRequests(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val reports = fetchAllPages { offset, limit ->
-                supabaseApi.getReports(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val deletionRequests = fetchAllPages { offset, limit ->
-                supabaseApi.getAccountDeletionRequests(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val reviews = fetchAllPages { offset, limit ->
-                supabaseApi.getReviews(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val ads = fetchAllPages { offset, limit ->
-                supabaseApi.getAdvertisements(mapOf("select" to "*", "order" to "created_at.desc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val dbCampuses = fetchAllPages { offset, limit ->
-                supabaseApi.getCampuses(mapOf("select" to "*", "order" to "name.asc", "offset" to "$offset", "limit" to "$limit")).body().orEmpty()
-            }
-            val campuses = dbCampuses.ifEmpty {
-                (KartGhanaCampuses + users.mapNotNull { it.campus } + products.mapNotNull { it.campus })
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() }
-                    .distinctBy { it.lowercase(Locale.US) }
-                    .sorted()
-                    .map { CampusRow(name = it, abbreviation = KartFormatters.abbreviateCampus(it)) }
-            }
-
-            val usersMap = users.associateBy { it.id }.toMutableMap()
-            val missingUserIds = buildList {
-                verifications.mapNotNullTo(this) { it.userId }
-                withdrawals.mapNotNullTo(this) { it.userId }
-                refunds.mapNotNullTo(this) { it.buyerId }
-                orders.mapNotNullTo(this) { it.buyerId }
-                orders.mapNotNullTo(this) { it.sellerId }
-                products.mapNotNullTo(this) { it.sellerId }
-                reports.mapNotNullTo(this) { it.reporterId }
-                reports.mapNotNullTo(this) { it.reportedUserId }
-                deletionRequests.mapNotNullTo(this) { it.userId }
-                reports.filter { it.resolvedTargetType.equals("user", true) || it.resolvedTargetType.equals("profile", true) }
-                    .mapNotNullTo(this) { it.resolvedTargetId }
-                reviews.mapNotNullTo(this) { it.reviewerId }
-                reviews.mapNotNullTo(this) { it.buyerId }
-                reviews.mapNotNullTo(this) { it.sellerId }
-            }
-                .filter { it.isNotBlank() && it !in usersMap }
-                .distinct()
-            if (missingUserIds.isNotEmpty()) {
-                runCatching {
-                    supabaseApi.getProfiles(mapOf("select" to "*", "id" to "in.(${missingUserIds.joinToString(",")})"))
-                        .body().orEmpty().forEach { usersMap[it.id] = it }
+            coroutineScope {
+                val statsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        val res = supabaseApi.getAdminOverviewStats()
+                        if (res.isSuccessful) res.body() else null
+                    }.getOrNull()
                 }
+                val usersDef = async(Dispatchers.IO) {
+                    val res = supabaseApi.getProfiles(
+                        mapOf("select" to "*", "order" to "created_at.desc,id.desc", "limit" to "200")
+                    )
+                    if (!res.isSuccessful) throw IllegalStateException(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Admin profiles query failed."))
+                    res.body().orEmpty()
+                }
+                val productsDef = async(Dispatchers.IO) {
+                    val res = supabaseApi.getProducts(
+                        mapOf("select" to "*", "order" to "created_at.desc,id.desc", "limit" to "200")
+                    )
+                    if (!res.isSuccessful) throw IllegalStateException(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Admin products query failed."))
+                    res.body().orEmpty()
+                }
+                val ordersDef = async(Dispatchers.IO) {
+                    val res = supabaseApi.getOrders(
+                        mapOf("select" to "*,product:products(id,title,image_url)", "order" to "created_at.desc", "limit" to "200")
+                    )
+                    if (!res.isSuccessful) throw IllegalStateException(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Admin orders query failed."))
+                    res.body().orEmpty()
+                }
+                val verificationsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getVerificationRequests(
+                            mapOf("select" to "*", "order" to "created_at.desc", "limit" to "100")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val withdrawalsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getWithdrawalRequests(
+                            mapOf("select" to "*", "order" to "created_at.desc", "limit" to "100")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val refundsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getRefundRequests(
+                            mapOf("select" to "*", "order" to "created_at.desc", "limit" to "100")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val reportsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getReports(
+                            mapOf("select" to "*", "order" to "created_at.desc", "limit" to "100")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val deletionsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getAccountDeletionRequests(
+                            mapOf("select" to "*", "order" to "created_at.desc", "limit" to "100")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val reviewsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getReviews(
+                            mapOf("select" to "*", "order" to "created_at.desc", "limit" to "200")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val adsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getAdvertisements(
+                            mapOf("select" to "*", "order" to "created_at.desc", "limit" to "200")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val campusesDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getCampuses(
+                            mapOf("select" to "*", "order" to "name.asc", "limit" to "100")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val plansDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getSubscriptionPlans(
+                            mapOf("select" to "*", "order" to "price.asc,duration_months.asc", "limit" to "50")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val subscriptionsDef = async(Dispatchers.IO) {
+                    runCatching {
+                        supabaseApi.getSubscriptions(
+                            mapOf("select" to "*,plan:subscription_plans(*)", "order" to "created_at.desc", "limit" to "100")
+                        ).body().orEmpty()
+                    }.getOrDefault(emptyList())
+                }
+                val flagsDef = async(Dispatchers.IO) { fetchPlatformFlags(forceRefresh = true) }
+
+                val serverStats = statsDef.await()
+                val users = usersDef.await()
+                val products = productsDef.await()
+                val orders = ordersDef.await()
+                val verifications = verificationsDef.await()
+                val withdrawals = withdrawalsDef.await()
+                val refunds = refundsDef.await()
+                val reports = reportsDef.await()
+                val deletionRequests = deletionsDef.await()
+                val reviews = reviewsDef.await()
+                val ads = adsDef.await()
+                val dbCampuses = campusesDef.await()
+                val subscriptionPlans = plansDef.await()
+                val subscriptions = subscriptionsDef.await()
+                val flags = flagsDef.await()
+
+                val campuses = dbCampuses.ifEmpty {
+                    (KartGhanaCampuses + users.mapNotNull { it.campus } + products.mapNotNull { it.campus })
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .distinctBy { it.lowercase(Locale.US) }
+                        .sorted()
+                        .map { CampusRow(name = it, abbreviation = KartFormatters.abbreviateCampus(it)) }
+                }
+
+                val usersMap = users.associateBy { it.id }.toMutableMap()
+                val missingUserIds = buildList {
+                    verifications.mapNotNullTo(this) { it.userId }
+                    withdrawals.mapNotNullTo(this) { it.userId }
+                    refunds.mapNotNullTo(this) { it.buyerId }
+                    orders.mapNotNullTo(this) { it.buyerId }
+                    orders.mapNotNullTo(this) { it.sellerId }
+                    products.mapNotNullTo(this) { it.sellerId }
+                    ads.mapNotNullTo(this) { it.sellerId }
+                    subscriptions.mapNotNullTo(this) { it.userId }
+                    reports.mapNotNullTo(this) { it.reporterId }
+                    reports.mapNotNullTo(this) { it.reportedUserId }
+                    deletionRequests.mapNotNullTo(this) { it.userId }
+                    reports.filter { it.resolvedTargetType.equals("user", true) || it.resolvedTargetType.equals("profile", true) }
+                        .mapNotNullTo(this) { it.resolvedTargetId }
+                    reviews.mapNotNullTo(this) { it.reviewerId }
+                    reviews.mapNotNullTo(this) { it.buyerId }
+                    reviews.mapNotNullTo(this) { it.sellerId }
+                }
+                    .filter { it.isNotBlank() && it !in usersMap }
+                    .distinct()
+                if (missingUserIds.isNotEmpty()) {
+                    runCatching {
+                        missingUserIds.chunked(50).forEach { chunk ->
+                            supabaseApi.getProfiles(
+                                mapOf("select" to "*", "id" to "in.(${chunk.joinToString(",")})")
+                            ).body().orEmpty().forEach { usersMap[it.id] = it }
+                        }
+                    }
+                }
+
+                val productsMap = products.associateBy { it.id }.toMutableMap()
+                val missingProductIds = buildList {
+                    orders.mapNotNullTo(this) { it.productId }
+                    ads.mapNotNullTo(this) { it.productId }
+                    reviews.mapNotNullTo(this) { it.productId }
+                    reports.filter { it.resolvedTargetType.equals("product", true) || it.resolvedTargetType.equals("listing", true) }
+                        .mapNotNullTo(this) { it.resolvedTargetId }
+                }
+                    .filter { it.isNotBlank() && it !in productsMap }
+                    .distinct()
+                if (missingProductIds.isNotEmpty()) {
+                    runCatching {
+                        missingProductIds.chunked(50).forEach { chunk ->
+                            supabaseApi.getProducts(
+                                mapOf("select" to "*", "id" to "in.(${chunk.joinToString(",")})")
+                            ).body().orEmpty().forEach { productsMap[it.id] = it }
+                        }
+                    }
+                }
+
+                val totalUsersServer = serverStats?.totalUsers
+                val totalListingsServer = serverStats?.totalListings
+                val bundle = AdminDashboardBundle(
+                    users = users,
+                    products = products,
+                    orders = orders,
+                    verifications = verifications,
+                    withdrawals = withdrawals,
+                    refunds = refunds,
+                    reports = reports,
+                    deletionRequests = deletionRequests,
+                    reviews = reviews,
+                    advertisements = ads,
+                    campuses = campuses,
+                    subscriptionPlans = subscriptionPlans,
+                    subscriptions = subscriptions,
+                    usersById = usersMap,
+                    ordersById = orders.associateBy { it.id },
+                    productsById = productsMap,
+                    buyNowEnabled = flags.buyNowEnabled,
+                    isMaintenanceMode = flags.isMaintenanceMode,
+                    promoDailyPrice = flags.promoDailyPrice,
+                    promoWeeklyPrice = flags.promoWeeklyPrice,
+                    promoFeaturedPrice = flags.promoFeaturedPrice,
+                    platformFlags = flags,
+                    serverStats = serverStats,
+                    usersHasMore = if (totalUsersServer != null) users.size < totalUsersServer else users.size >= 200,
+                    productsHasMore = if (totalListingsServer != null) products.size < totalListingsServer else products.size >= 200
+                )
+                cachedAdminBundle = bundle
+                cachedAdminFetchedAtMs = System.currentTimeMillis()
+                ApiResult.Success(bundle)
             }
-
-            val flags = fetchPlatformFlags()
-
-            val bundle = AdminDashboardBundle(
-                users = users,
-                products = products,
-                orders = orders,
-                verifications = verifications,
-                withdrawals = withdrawals,
-                refunds = refunds,
-                reports = reports,
-                deletionRequests = deletionRequests,
-                reviews = reviews,
-                advertisements = ads,
-                campuses = campuses,
-                usersById = usersMap,
-                ordersById = orders.associateBy { it.id },
-                productsById = products.associateBy { it.id },
-                buyNowEnabled = flags.buyNowEnabled,
-                isMaintenanceMode = flags.isMaintenanceMode,
-                promoBoostRate = flags.promoBoostRate,
-                promoFeaturedRate = flags.promoFeaturedRate,
-                promoCampusAdRate = flags.promoCampusAdRate
-            )
-            cachedAdminBundle = bundle
-            cachedAdminFetchedAtMs = System.currentTimeMillis()
-            ApiResult.Success(bundle)
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to load admin dashboard.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load admin dashboard."))
         }
     }
 
@@ -2637,18 +3267,23 @@ class KartRepository(
         }
     }
 
+    suspend fun adminUpdateUserRole(userId: String, isAdmin: Boolean): ApiResult<Unit> {
+        val currentUserId = sessionStore.currentSession().userId
+        if (!isAdmin && userId == currentUserId) {
+            return ApiResult.Error("You cannot revoke your own administrative privileges.")
+        }
+        return runApiAction {
+            kartWebApi.adminUpdateUserRole(mapOf("userId" to userId, "isAdmin" to isAdmin))
+        }
+    }
+
     suspend fun adminUpdateProductStatus(productId: String, status: String): ApiResult<Unit> = runApiAction {
         val normalizedStatus = if (status.equals("Suspended", ignoreCase = true)) "Banned" else status
         kartWebApi.adminUpdateProductStatus(mapOf("productId" to productId, "status" to normalizedStatus))
     }
 
-    suspend fun adminDeleteProduct(productId: String): ApiResult<Unit> {
-        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
-        val res = runCatching {
-            supabaseApi.deleteProduct(idFilter = "eq.$productId")
-        }.getOrNull() ?: return ApiResult.Error("Network error while deleting listing.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to delete listing (${res.code()}).")
+    suspend fun adminDeleteProduct(productId: String): ApiResult<Unit> = runApiAction {
+        kartWebApi.adminDeleteProduct(mapOf("productId" to productId))
     }
 
     suspend fun adminResolveVerification(
@@ -2674,98 +3309,92 @@ class KartRepository(
         else kartWebApi.adminRejectVerification(body)
     }
 
-    suspend fun adminResolveWithdrawal(requestId: String, approve: Boolean): ApiResult<Unit> = runApiAction {
-        val body = mapOf(
-            "withdrawalId" to requestId,
-            "withdrawal_id" to requestId,
-            "requestId" to requestId,
-            "id" to requestId
-        )
-        if (approve) kartWebApi.adminApproveWithdrawal(body)
-        else kartWebApi.adminRejectWithdrawal(body)
+    suspend fun adminResolveWithdrawal(
+        requestId: String,
+        approve: Boolean,
+        reason: String? = null
+    ): ApiResult<Unit> = runApiAction {
+        if (approve) {
+            kartWebApi.adminApproveWithdrawal(mapOf("withdrawalRequestId" to requestId))
+        } else {
+            val body = buildMap {
+                put("withdrawalRequestId", requestId)
+                reason?.trim()?.takeIf { it.isNotBlank() }?.let { put("reason", it) }
+            }
+            kartWebApi.adminRejectWithdrawal(body)
+        }
+    }
+
+    suspend fun adminManualApproveWithdrawal(
+        requestId: String,
+        manualReference: String? = null,
+        manualTransactionId: String? = null,
+        manualNotes: String? = null
+    ): ApiResult<Unit> = runApiAction {
+        val body = buildMap<String, Any> {
+            put("withdrawalRequestId", requestId)
+            manualReference?.trim()?.takeIf { it.isNotBlank() }?.let { put("manualReference", it) }
+            manualTransactionId?.trim()?.takeIf { it.isNotBlank() }?.let { put("manualTransactionId", it) }
+            manualNotes?.trim()?.takeIf { it.isNotBlank() }?.let { put("manualNotes", it) }
+        }
+        kartWebApi.adminManualApproveWithdrawal(body)
+    }
+
+    suspend fun adminRetryWithdrawalPaystack(requestId: String): ApiResult<Unit> = runApiAction {
+        kartWebApi.adminRetryWithdrawalPaystack(mapOf("withdrawalRequestId" to requestId))
     }
 
     suspend fun adminResolveDeletionRequest(
         requestId: String,
         userId: String?,
-        approve: Boolean
+        approve: Boolean,
+        reason: String? = null
     ): ApiResult<Unit> {
-        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
-        val targetUserId = userId?.takeIf { it.isNotBlank() }
-        if (approve && targetUserId != null) {
-            val currentUserId = sessionStore.currentSession().userId
-            if (targetUserId == currentUserId) {
-                return ApiResult.Error("You cannot approve a deletion request for your own admin account.")
-            }
-            val banRes = adminBanUser(targetUserId, true)
-            if (banRes is ApiResult.Error) return banRes
-
-            val listingsRes = runCatching {
-                supabaseApi.getProducts(
-                    mapOf(
-                        "select" to "id,status,seller_id",
-                        "seller_id" to "eq.$targetUserId"
-                    )
-                )
-            }.getOrNull()
-                ?: return ApiResult.Error("Network error while fetching user listings to suspend.")
-            if (!listingsRes.isSuccessful) {
-                return ApiResult.Error("Could not fetch user listings to suspend (${listingsRes.code()}).")
-            }
-            val userActiveListings = listingsRes.body().orEmpty().filter { it.isActiveListing }
-            for (listing in userActiveListings) {
-                val suspendRes = adminUpdateProductStatus(listing.id, "Banned")
-                if (suspendRes is ApiResult.Error) {
-                    return ApiResult.Error("Failed to suspend listing ${listing.id}: ${suspendRes.message}")
+        val currentUserId = sessionStore.currentSession().userId
+        if (approve && !userId.isNullOrBlank() && userId == currentUserId) {
+            return ApiResult.Error("You cannot approve a deletion request for your own admin account.")
+        }
+        return runApiAction {
+            if (approve) {
+                kartWebApi.adminApproveAccountDeletion(mapOf("requestId" to requestId))
+            } else {
+                val body = buildMap {
+                    put("requestId", requestId)
+                    reason?.trim()?.takeIf { it.isNotBlank() }?.let { put("rejectionReason", it) }
                 }
+                kartWebApi.adminRejectAccountDeletion(body)
             }
         }
-        val status = if (approve) "approved" else "rejected"
-        val res = runCatching {
-            supabaseApi.updateAccountDeletionRequest(
-                idFilter = "eq.$requestId",
-                body = mapOf("status" to status, "updated_at" to nowIsoUtc())
-            )
-        }.getOrNull() ?: return ApiResult.Error("Network error while updating deletion request.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to update deletion request (${res.code()}).")
     }
 
-    suspend fun adminDeleteReview(reviewId: String): ApiResult<Unit> {
-        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
-        val res = runCatching {
-            supabaseApi.deleteReview(idFilter = "eq.$reviewId")
-        }.getOrNull() ?: return ApiResult.Error("Network error while deleting review.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to delete review (${res.code()}).")
+    suspend fun adminDeleteReview(reviewId: String): ApiResult<Unit> = runApiAction {
+        kartWebApi.adminDeleteReview(mapOf("reviewId" to reviewId))
     }
 
-    suspend fun adminUpdateReportStatus(reportId: String, status: String): ApiResult<Unit> {
-        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
-        val res = runCatching {
-            supabaseApi.updateReport(
-                idFilter = "eq.$reportId",
-                body = mapOf("status" to status, "updated_at" to nowIsoUtc())
-            )
-        }.getOrNull() ?: return ApiResult.Error("Network error while updating report.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to update report (${res.code()}).")
+    suspend fun adminUpdateReportStatus(reportId: String, status: String): ApiResult<Unit> = runApiAction {
+        kartWebApi.adminUpdateReport(mapOf("reportId" to reportId, "status" to status))
     }
 
     suspend fun adminUpdateAdStatus(adId: String, status: String): ApiResult<Unit> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
-        val body = mutableMapOf<String, Any?>("status" to status)
+        val cachedAd = cachedAdminBundle?.advertisements?.firstOrNull { it.id == adId }
+        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+        var targetEndIso = cachedAd?.endDate
+        val body = mutableMapOf<String, Any?>(
+            "status" to status,
+            "updated_at" to nowIsoUtc()
+        )
         if (status.equals("Active", ignoreCase = true)) {
-            val cachedAd = cachedAdminBundle?.advertisements?.firstOrNull { it.id == adId }
             val endMs = KartFormatters.parseIsoTimestamp(cachedAd?.endDate)
             val nowMs = System.currentTimeMillis()
             if (endMs <= nowMs) {
-                val days = (cachedAd?.durationDays ?: 7).coerceAtLeast(1)
-                val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-                    timeZone = TimeZone.getTimeZone("UTC")
-                }
+                val days = cachedAd?.resolvedDurationDays?.takeIf { it > 0 } ?: 7
+                val newEndIso = sdf.format(Date(nowMs + days * 86_400_000L))
                 body["start_date"] = sdf.format(Date(nowMs))
-                body["end_date"] = sdf.format(Date(nowMs + days * 86_400_000L))
+                body["end_date"] = newEndIso
+                targetEndIso = newEndIso
             }
         }
         val res = runCatching {
@@ -2774,17 +3403,92 @@ class KartRepository(
                 body = body
             )
         }.getOrNull() ?: return ApiResult.Error("Network error while updating ad.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to update ad (${res.code()}).")
+        if (!res.isSuccessful) {
+            return ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Failed to update ad."))
+        }
+
+        val updatedAd = res.body()?.firstOrNull() ?: cachedAd
+        val productId = updatedAd?.productId?.takeIf { it.isNotBlank() }
+        if (productId != null) {
+            val adType = updatedAd.adType ?: "Boost"
+            val isFeatured = adType.equals("Featured", ignoreCase = true)
+            if (status.equals("Active", ignoreCase = true)) {
+                val productUpdates = if (isFeatured) {
+                    mapOf<String, Any?>("is_featured" to true, "updated_at" to nowIsoUtc())
+                } else {
+                    buildMap<String, Any?> {
+                        put("is_boosted", true)
+                        put("updated_at", nowIsoUtc())
+                        val endVal = updatedAd.endDate ?: targetEndIso
+                        if (!endVal.isNullOrBlank()) put("boost_expires_at", endVal)
+                    }
+                }
+                runCatching {
+                    supabaseApi.updateProduct(idFilter = "eq.$productId", body = productUpdates)
+                }
+            } else {
+                val otherActive = runCatching {
+                    supabaseApi.getAdvertisements(
+                        mapOf(
+                            "select" to "id",
+                            "product_id" to "eq.$productId",
+                            "ad_type" to "eq.$adType",
+                            "status" to "eq.Active",
+                            "limit" to "1"
+                        )
+                    ).body().orEmpty()
+                }.getOrDefault(emptyList())
+                if (otherActive.isEmpty()) {
+                    val clearUpdates = if (isFeatured) {
+                        mapOf<String, Any?>("is_featured" to false, "updated_at" to nowIsoUtc())
+                    } else {
+                        mapOf<String, Any?>("is_boosted" to false, "updated_at" to nowIsoUtc())
+                    }
+                    runCatching {
+                        supabaseApi.updateProduct(idFilter = "eq.$productId", body = clearUpdates)
+                    }
+                }
+            }
+        }
+        return ApiResult.Success(Unit)
     }
 
     suspend fun adminDeleteAd(adId: String): ApiResult<Unit> {
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
+        val cachedAd = cachedAdminBundle?.advertisements?.firstOrNull { it.id == adId }
         val res = runCatching {
             supabaseApi.deleteAdvertisement(idFilter = "eq.$adId")
         }.getOrNull() ?: return ApiResult.Error("Network error while deleting ad.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to delete ad (${res.code()}).")
+        if (!res.isSuccessful) {
+            return ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Failed to delete ad."))
+        }
+        val productId = cachedAd?.productId?.takeIf { it.isNotBlank() }
+        if (productId != null) {
+            val adType = cachedAd.adType ?: "Boost"
+            val otherActive = runCatching {
+                supabaseApi.getAdvertisements(
+                    mapOf(
+                        "select" to "id",
+                        "product_id" to "eq.$productId",
+                        "ad_type" to "eq.$adType",
+                        "status" to "eq.Active",
+                        "limit" to "1"
+                    )
+                ).body().orEmpty()
+            }.getOrDefault(emptyList())
+            if (otherActive.isEmpty()) {
+                val isFeatured = adType.equals("Featured", ignoreCase = true)
+                val clearUpdates = if (isFeatured) {
+                    mapOf<String, Any?>("is_featured" to false, "updated_at" to nowIsoUtc())
+                } else {
+                    mapOf<String, Any?>("is_boosted" to false, "updated_at" to nowIsoUtc())
+                }
+                runCatching {
+                    supabaseApi.updateProduct(idFilter = "eq.$productId", body = clearUpdates)
+                }
+            }
+        }
+        return ApiResult.Success(Unit)
     }
 
     suspend fun adminAddCampus(name: String, abbreviation: String?): ApiResult<Unit> {
@@ -2799,8 +3503,11 @@ class KartRepository(
                 )
             )
         }.getOrNull() ?: return ApiResult.Error("Network error while adding campus.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to add campus (${res.code()}).")
+        return if (res.isSuccessful) {
+            cachedCampuses = null
+            campusesFetchedAtMs = 0L
+            ApiResult.Success(Unit)
+        } else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Failed to add campus."))
     }
 
     suspend fun adminUpdateCampus(id: String, name: String, abbreviation: String?): ApiResult<Unit> {
@@ -2816,8 +3523,11 @@ class KartRepository(
                 )
             )
         }.getOrNull() ?: return ApiResult.Error("Network error while updating campus.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to update campus (${res.code()}).")
+        return if (res.isSuccessful) {
+            cachedCampuses = null
+            campusesFetchedAtMs = 0L
+            ApiResult.Success(Unit)
+        } else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Failed to update campus."))
     }
 
     suspend fun adminDeleteCampus(id: String): ApiResult<Unit> {
@@ -2825,8 +3535,11 @@ class KartRepository(
         val res = runCatching {
             supabaseApi.deleteCampus(idFilter = "eq.$id")
         }.getOrNull() ?: return ApiResult.Error("Network error while deleting campus.")
-        return if (res.isSuccessful) ApiResult.Success(Unit)
-        else ApiResult.Error(extractHttpErrorMessage(res) ?: "Failed to delete campus (${res.code()}).")
+        return if (res.isSuccessful) {
+            cachedCampuses = null
+            campusesFetchedAtMs = 0L
+            ApiResult.Success(Unit)
+        } else ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), extractHttpErrorMessage(res), "Failed to delete campus."))
     }
 
     suspend fun adminResolveRefund(orderId: String, requestId: String, approve: Boolean): ApiResult<Unit> = runApiAction {
@@ -2841,7 +3554,91 @@ class KartRepository(
         )
     }
 
-    suspend fun adminSetPlatformSetting(key: String, value: Boolean): ApiResult<Unit> {
+    suspend fun adminCreateSubscriptionPlan(
+        name: String,
+        price: Double,
+        durationMonths: Int,
+        features: List<String>
+    ): ApiResult<Unit> {
+        val cleanName = name.trim()
+        if (cleanName.isBlank()) return ApiResult.Error("Plan name is required.")
+        if (price < 0.0) return ApiResult.Error("Price cannot be negative.")
+        if (durationMonths < 1) return ApiResult.Error("Duration must be at least 1 month.")
+        return runApiAction {
+            kartWebApi.adminCreateSubscriptionPlan(
+                mapOf(
+                    "name" to cleanName,
+                    "price" to price,
+                    "duration_months" to durationMonths,
+                    "features" to features.map { it.trim() }.filter { it.isNotBlank() }
+                )
+            )
+        }
+    }
+
+    suspend fun adminUpdateSubscriptionPlan(
+        id: String,
+        name: String,
+        price: Double,
+        durationMonths: Int,
+        features: List<String>
+    ): ApiResult<Unit> {
+        val cleanName = name.trim()
+        if (cleanName.isBlank()) return ApiResult.Error("Plan name is required.")
+        if (price < 0.0) return ApiResult.Error("Price cannot be negative.")
+        if (durationMonths < 1) return ApiResult.Error("Duration must be at least 1 month.")
+        return runApiAction {
+            kartWebApi.adminUpdateSubscriptionPlan(
+                mapOf(
+                    "id" to id,
+                    "name" to cleanName,
+                    "price" to price,
+                    "duration_months" to durationMonths,
+                    "features" to features.map { it.trim() }.filter { it.isNotBlank() }
+                )
+            )
+        }
+    }
+
+    suspend fun adminDeleteSubscriptionPlan(id: String): ApiResult<Unit> = runApiAction {
+        kartWebApi.adminDeleteSubscriptionPlan(id)
+    }
+
+    suspend fun adminUpdateSubscriptionStatus(subscriptionId: String, status: String): ApiResult<Unit> {
+        val webRes = runCatching {
+            kartWebApi.adminUpdateSubscriptionStatus(
+                mapOf("subscriptionId" to subscriptionId, "status" to status)
+            )
+        }.getOrNull()
+        if (webRes?.isSuccessful == true && webRes.body()?.get("success") != false) {
+            return ApiResult.Success(Unit)
+        }
+        if (webRes != null && webRes.code() in 400..499) {
+            return ApiResult.Error(KartErrorFormatter.fromHttpStatus(webRes.code(), extractHttpErrorMessage(webRes), "Failed to update subscription."))
+        }
+        // Fallback to direct Supabase PostgREST under admin RLS if backend returns 500 or is offline
+        if (!hasSupabaseKey()) {
+            return ApiResult.Error(webRes?.let { extractHttpErrorMessage(it) } ?: requireKeyMessage())
+        }
+        val dbRes = runCatching {
+            supabaseApi.updateSubscription(
+                idFilter = "eq.$subscriptionId",
+                body = mapOf("status" to status, "updated_at" to nowIsoUtc())
+            )
+        }.getOrNull() ?: return ApiResult.Error("Network error while updating subscription.")
+        return if (dbRes.isSuccessful && !dbRes.body().isNullOrEmpty()) {
+            ApiResult.Success(Unit)
+        } else {
+            ApiResult.Error(
+                extractHttpErrorMessage(dbRes)
+                    ?: webRes?.let { extractHttpErrorMessage(it) }
+                    ?: KartErrorFormatter.fromHttpStatus(dbRes.code(), fallback = "Failed to update subscription.")
+            )
+        }
+    }
+
+    suspend fun adminSavePlatformSettings(updates: List<Pair<String, Any>>): ApiResult<Unit> {
+        if (updates.isEmpty()) return ApiResult.Error("No settings provided.")
         if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
         val currentUserId = sessionStore.currentSession().userId
         val profile = fetchMyProfile(currentUserId)
@@ -2849,148 +3646,32 @@ class KartRepository(
             return ApiResult.Error("Admin access required to update platform settings.")
         }
 
-        val payloads: List<Map<String, Any>> = listOf(
-            mapOf("key" to key, "value" to value),
-            mapOf("key" to key, "value" to value.toString()),
-            mapOf(key to value),
-            mapOf("settings" to mapOf(key to value))
+        val payload = mapOf(
+            "updates" to updates.map { (k, v) -> mapOf("key" to k, "value" to v) }
         )
-        val webSenders: List<Pair<String, suspend (Map<String, Any>) -> retrofit2.Response<Map<String, Any>>>> = listOf(
-            "PATCH" to { body -> kartWebApi.adminPatchSettings(body) },
-            "PUT" to { body -> kartWebApi.adminPutSettings(body) },
-            "POST" to { body -> kartWebApi.adminUpdateSettings(body) }
-        )
-
-        var lastWebError: String? = null
-        for ((_, sender) in webSenders) {
-            var methodNotAllowed = false
-            for (payload in payloads) {
-                val res = runCatching { sender(payload) }.getOrNull() ?: break
-                if (res.isSuccessful) {
-                    val persisted = if (key == KEY_BUY_NOW_ENABLED) {
-                        isBuyNowEnabled() == value
-                    } else if (key == KEY_MAINTENANCE_MODE) {
-                        isMaintenanceMode() == value
-                    } else true
-                    if (persisted) return ApiResult.Success(Unit)
-                    lastWebError = "Settings endpoint ignored payload format; trying fallback."
-                    continue
-                }
-                val code = res.code()
-                if (code == 405) {
-                    methodNotAllowed = true
-                    break
-                }
-                val parsedErr = extractHttpErrorMessage(res)
-                lastWebError = parsedErr ?: "Admin settings update failed ($code)."
-                // Only retry alternate payload shapes on client validation errors (400 / 422)
-                if (code != 400 && code != 422) {
-                    break
-                }
-            }
-            if (!methodNotAllowed) break
+        val webRes = runCatching { kartWebApi.adminPutSettings(payload) }.getOrNull()
+        if (webRes?.isSuccessful == true && webRes.body()?.get("success") != false) {
+            platformFlagsFetchedAtMs = 0L
+            cachedAdminFetchedAtMs = 0L
+            return ApiResult.Success(Unit)
+        }
+        if (webRes != null && webRes.code() in 400..499 && webRes.code() != 404 && webRes.code() != 405) {
+            return ApiResult.Error(KartErrorFormatter.fromHttpStatus(webRes.code(), extractHttpErrorMessage(webRes), "Settings update rejected."))
         }
 
-        // Fallback to direct Supabase PostgREST (enforced by admin RLS on platform_settings)
-        var lastDbError: String? = null
+        // Fallback to direct Supabase PostgREST only when backend is unreachable or returns 5xx
         val nowIso = nowIsoUtc()
-        val patchValues: List<Any> = listOf(value, value.toString())
-        for (candidateVal in patchValues) {
+        for ((key, rawVal) in updates) {
+            val dbValue: Any = when (rawVal) {
+                is Boolean -> rawVal
+                is Number -> rawVal
+                else -> rawVal.toString()
+            }
             val patchRes = runCatching {
                 supabaseApi.patchPlatformSetting(
                     keyFilter = "eq.$key",
                     body = mapOf(
-                        "value" to candidateVal,
-                        "updated_at" to nowIso,
-                        "updated_by" to currentUserId.ifBlank { null }
-                    )
-                )
-            }.getOrNull()
-            if (patchRes?.isSuccessful == true && !patchRes.body().isNullOrEmpty()) {
-                cachedAdminFetchedAtMs = 0L
-                return ApiResult.Success(Unit)
-            }
-            if (patchRes != null && !patchRes.isSuccessful) {
-                lastDbError = extractHttpErrorMessage(patchRes) ?: "Database update failed (${patchRes.code()})."
-            }
-        }
-
-        val fallbackCategory = runCatching {
-            supabaseApi.getPlatformSettings(
-                mapOf("select" to "key,value,category", "limit" to "1")
-            ).body()?.firstOrNull()?.category?.takeIf { it.isNotBlank() }
-        }.getOrNull() ?: "general"
-
-        val settingLabel = when (key) {
-            KEY_BUY_NOW_ENABLED -> "Buy Now on Product Pages"
-            KEY_MAINTENANCE_MODE -> "Maintenance Mode"
-            else -> key.replace('_', ' ').replaceFirstChar { it.uppercase() }
-        }
-        val settingDescription = when (key) {
-            KEY_BUY_NOW_ENABLED -> "Controls whether buyers can tap Buy Now and complete checkout from product detail pages."
-            KEY_MAINTENANCE_MODE -> "Temporarily places Kart into maintenance mode for non-admin users."
-            else -> "Platform configuration toggle for $settingLabel."
-        }
-
-        for (candidateVal in patchValues) {
-            val upsertRes = runCatching {
-                supabaseApi.upsertPlatformSetting(
-                    body = mapOf(
-                        "key" to key,
-                        "value" to candidateVal,
-                        "category" to fallbackCategory,
-                        "label" to settingLabel,
-                        "description" to settingDescription,
-                        "updated_at" to nowIso,
-                        "updated_by" to currentUserId.ifBlank { null }
-                    )
-                )
-            }.getOrNull()
-            if (upsertRes?.isSuccessful == true) {
-                cachedAdminFetchedAtMs = 0L
-                return ApiResult.Success(Unit)
-            }
-            if (upsertRes != null && !upsertRes.isSuccessful) {
-                lastDbError = extractHttpErrorMessage(upsertRes) ?: "Database upsert failed (${upsertRes.code()})."
-            }
-        }
-
-        return ApiResult.Error(
-            lastDbError
-                ?: lastWebError
-                ?: "Could not update platform setting. Ensure the platform_settings migration is applied on Supabase."
-        )
-    }
-
-    suspend fun adminUpdatePromotionRates(
-        boostRate: Double,
-        featuredRate: Double,
-        campusAdRate: Double
-    ): ApiResult<Unit> {
-        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
-        val currentUserId = sessionStore.currentSession().userId
-        val profile = fetchMyProfile(currentUserId)
-        if (profile?.isAdmin != true) {
-            return ApiResult.Error("Admin access required to update promotion rates.")
-        }
-        val updates = listOf(
-            Triple(KEY_PROMO_BOOST_RATE, boostRate, "Boost Promotion Rate (GHS)"),
-            Triple(KEY_PROMO_FEATURED_RATE, featuredRate, "Featured Promotion Rate (GHS)"),
-            Triple(KEY_PROMO_CAMPUS_AD_RATE, campusAdRate, "Campus Ad Promotion Rate (GHS)")
-        )
-        val nowIso = nowIsoUtc()
-        for ((key, rate, label) in updates) {
-            val formatted = String.format(Locale.US, "%.2f", rate)
-            val webRes = runCatching {
-                kartWebApi.adminPatchSettings(mapOf("key" to key, "value" to rate))
-            }.getOrNull()
-            if (webRes?.isSuccessful == true) continue
-
-            val patchRes = runCatching {
-                supabaseApi.patchPlatformSetting(
-                    keyFilter = "eq.$key",
-                    body = mapOf(
-                        "value" to formatted,
+                        "value" to dbValue,
                         "updated_at" to nowIso,
                         "updated_by" to currentUserId.ifBlank { null }
                     )
@@ -2998,14 +3679,26 @@ class KartRepository(
             }.getOrNull()
             if (patchRes?.isSuccessful == true && !patchRes.body().isNullOrEmpty()) continue
 
+            val category = when {
+                key.startsWith("promo_") -> "promotion"
+                key in setOf(
+                    KEY_MARKETPLACE_SERVICE_FEE,
+                    KEY_TRANSACTION_FEE_FIXED,
+                    KEY_TRANSACTION_FEE_PERCENT,
+                    KEY_WITHDRAWAL_FEE_FLAT,
+                    KEY_MIN_DEPOSIT_AMOUNT,
+                    KEY_MIN_WITHDRAWAL_AMOUNT
+                ) -> "financial"
+                else -> "general"
+            }
             val upsertRes = runCatching {
                 supabaseApi.upsertPlatformSetting(
                     body = mapOf(
                         "key" to key,
-                        "value" to formatted,
-                        "category" to "promotions",
-                        "label" to label,
-                        "description" to "Pricing rate in GHS for $label.",
+                        "value" to dbValue,
+                        "category" to category,
+                        "label" to key.replace('_', ' ').replaceFirstChar { it.uppercase() },
+                        "description" to "Platform setting for $key.",
                         "updated_at" to nowIso,
                         "updated_by" to currentUserId.ifBlank { null }
                     )
@@ -3014,17 +3707,146 @@ class KartRepository(
             if (upsertRes?.isSuccessful != true) {
                 val err = upsertRes?.let { extractHttpErrorMessage(it) }
                     ?: patchRes?.let { extractHttpErrorMessage(it) }
-                    ?: "Failed to save $label."
+                    ?: webRes?.let { extractHttpErrorMessage(it) }
+                    ?: "Failed to update $key."
                 return ApiResult.Error(err)
             }
         }
+        platformFlagsFetchedAtMs = 0L
         cachedAdminFetchedAtMs = 0L
         return ApiResult.Success(Unit)
     }
 
+    suspend fun adminSetPlatformSetting(key: String, value: Boolean): ApiResult<Unit> =
+        adminSavePlatformSettings(listOf(key to value))
+
+    suspend fun adminUpdatePromotionRates(
+        dailyPrice: Double,
+        weeklyPrice: Double,
+        featuredPrice: Double
+    ): ApiResult<Unit> {
+        if (dailyPrice < 0.0 || weeklyPrice < 0.0 || featuredPrice < 0.0) {
+            return ApiResult.Error("Promotion prices cannot be negative.")
+        }
+        return adminSavePlatformSettings(
+            listOf(
+                KEY_PROMO_DAILY_PRICE to dailyPrice,
+                KEY_PROMO_WEEKLY_PRICE to weeklyPrice,
+                KEY_PROMO_FEATURED_PRICE to featuredPrice
+            )
+        )
+    }
+
+    suspend fun fetchAdminUsersPage(
+        offset: Int,
+        limit: Int = 50,
+        query: String = "",
+        filter: String = "All"
+    ): ApiResult<Pair<List<Profile>, Boolean>> {
+        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
+        return try {
+            val cleanQ = query.trim().replace(",", " ").replace("(", " ").replace(")", " ").replace("*", "")
+            val pageLimit = limit.coerceIn(10, 100)
+            val params = linkedMapOf(
+                "select" to "*",
+                "order" to "created_at.desc,id.desc",
+                "offset" to offset.coerceAtLeast(0).toString(),
+                "limit" to (pageLimit + 1).toString()
+            )
+            val andClauses = mutableListOf<String>()
+            when (filter) {
+                "Active" -> andClauses.add("or(banned.is.null,banned.eq.false)")
+                "Banned" -> params["banned"] = "eq.true"
+                "Verified" -> params["is_verified"] = "eq.true"
+                "Admins" -> params["is_admin"] = "eq.true"
+            }
+            if (cleanQ.isNotBlank()) {
+                if (UUID_REGEX.matches(cleanQ)) {
+                    params["id"] = "eq.$cleanQ"
+                } else {
+                    andClauses.add(
+                        "or(display_name.ilike.*$cleanQ*,username.ilike.*$cleanQ*,email.ilike.*$cleanQ*,campus.ilike.*$cleanQ*,phone.ilike.*$cleanQ*)"
+                    )
+                }
+            }
+            if (andClauses.isNotEmpty()) {
+                params["and"] = "(${andClauses.joinToString(",")})"
+            }
+            val res = supabaseApi.getProfiles(params)
+            if (!res.isSuccessful) {
+                return ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Admin profiles query failed."))
+            }
+            val raw = res.body().orEmpty()
+            ApiResult.Success(raw.take(pageLimit) to (raw.size > pageLimit))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load users page."))
+        }
+    }
+
+    suspend fun fetchAdminProductsPage(
+        offset: Int,
+        limit: Int = 50,
+        query: String = "",
+        filter: String = "All"
+    ): ApiResult<Triple<List<Product>, Boolean, Map<String, Profile>>> {
+        if (!hasSupabaseKey()) return ApiResult.Error(requireKeyMessage())
+        return try {
+            val cleanQ = query.trim().replace(",", " ").replace("(", " ").replace(")", " ").replace("*", "")
+            val pageLimit = limit.coerceIn(10, 100)
+            val params = linkedMapOf(
+                "select" to "*",
+                "order" to "created_at.desc,id.desc",
+                "offset" to offset.coerceAtLeast(0).toString(),
+                "limit" to (pageLimit + 1).toString()
+            )
+            val andClauses = mutableListOf<String>()
+            when (filter) {
+                "Active" -> andClauses.add("or(status.is.null,status.ilike.Active)")
+                "Suspended" -> andClauses.add("or(status.ilike.Banned,status.ilike.Suspended)")
+                "Sold" -> andClauses.add("or(status.ilike.Sold,stock_quantity.lte.0)")
+            }
+            if (cleanQ.isNotBlank()) {
+                if (UUID_REGEX.matches(cleanQ)) {
+                    params["id"] = "eq.$cleanQ"
+                } else {
+                    andClauses.add(
+                        "or(title.ilike.*$cleanQ*,category.ilike.*$cleanQ*,campus.ilike.*$cleanQ*,status.ilike.*$cleanQ*)"
+                    )
+                }
+            }
+            if (andClauses.isNotEmpty()) {
+                params["and"] = "(${andClauses.joinToString(",")})"
+            }
+            val res = supabaseApi.getProducts(params)
+            if (!res.isSuccessful) {
+                return ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), fallback = "Admin products query failed."))
+            }
+            val raw = res.body().orEmpty()
+            val items = raw.take(pageLimit)
+            val existingUsers = cachedAdminBundle?.usersById.orEmpty()
+            val missingSellerIds = items.mapNotNull { it.sellerId }
+                .filter { it.isNotBlank() && it !in existingUsers }
+                .distinct()
+            val resolvedUsers = mutableMapOf<String, Profile>()
+            if (missingSellerIds.isNotEmpty()) {
+                runCatching {
+                    missingSellerIds.chunked(50).forEach { chunk ->
+                        supabaseApi.getProfiles(
+                            mapOf("select" to "*", "id" to "in.(${chunk.joinToString(",")})")
+                        ).body().orEmpty().forEach { resolvedUsers[it.id] = it }
+                    }
+                }
+            }
+            ApiResult.Success(Triple(items, raw.size > pageLimit, resolvedUsers))
+        } catch (e: Exception) {
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Failed to load listings page."))
+        }
+    }
+
     private fun extractHttpErrorMessage(res: retrofit2.Response<*>): String? {
         val errBody = runCatching { res.errorBody()?.string() }.getOrNull().orEmpty()
-        return parseHttpErrorBody(errBody, res.code())
+        val parsed = parseHttpErrorBody(errBody, res.code()) ?: return null
+        return KartErrorFormatter.fromHttpStatus(res.code(), parsed)
     }
 
     private suspend fun runApiAction(call: suspend () -> retrofit2.Response<Map<String, Any>>): ApiResult<Unit> {
@@ -3042,10 +3864,10 @@ class KartRepository(
                 }
             } else {
                 val errMsg = extractHttpErrorMessage(res)
-                ApiResult.Error(errMsg ?: res.body()?.get("error")?.toString() ?: "Action failed (${res.code()}).")
+                ApiResult.Error(KartErrorFormatter.fromHttpStatus(res.code(), errMsg ?: res.body()?.get("error")?.toString(), "Action failed."))
             }
         } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Request failed.")
+            ApiResult.Error(KartErrorFormatter.fromThrowable(e, "Request failed."))
         }
     }
 }

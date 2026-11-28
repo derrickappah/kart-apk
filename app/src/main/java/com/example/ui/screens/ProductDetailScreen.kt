@@ -438,8 +438,14 @@ private fun ProductHeroGallery(
                         clip = true
                     }
             ) { page ->
+                val detailImageModel = remember(images[page]) {
+                    images[page]
+                        .takeIf { it.isNotBlank() }
+                        ?.let { KartFormatters.buildOptimizedImageUrl(it, KartFormatters.ImageVariant.DETAIL) }
+                        ?.ifBlank { null }
+                }
                 AsyncImage(
-                    model = images[page].ifBlank { null },
+                    model = detailImageModel,
                     contentDescription = title,
                     placeholder = painterResource(R.drawable.img_placeholder),
                     error = painterResource(R.drawable.img_placeholder),

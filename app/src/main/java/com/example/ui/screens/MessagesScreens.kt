@@ -147,6 +147,7 @@ fun MessagesInboxScreen(
     onExploreShop: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val isRealtimeConnected by viewModel.isRealtimeConnected.collectAsStateWithLifecycle()
     val tokens = KartThemeTokens.colors
     var search by remember { mutableStateOf("") }
 
@@ -168,12 +169,21 @@ fun MessagesInboxScreen(
         return
     }
 
+    DisposableEffect(userId) {
+        viewModel.acquireRealtime(userId)
+        onDispose { viewModel.releaseRealtime() }
+    }
+
     LaunchedEffect(userId) {
-        viewModel.startRealtime(userId)
         viewModel.loadConversations(userId)
-        while (true) {
-            delay(8000L)
-            viewModel.loadConversations(userId)
+    }
+
+    LaunchedEffect(userId, isRealtimeConnected) {
+        if (!isRealtimeConnected) {
+            while (true) {
+                delay(60_000L)
+                viewModel.loadConversations(userId)
+            }
         }
     }
 
@@ -470,6 +480,7 @@ fun ChatThreadScreen(
     onUserClick: (String) -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val isRealtimeConnected by viewModel.isRealtimeConnected.collectAsStateWithLifecycle()
     val tokens = KartThemeTokens.colors
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
@@ -656,18 +667,31 @@ fun ChatThreadScreen(
         }
     }
 
-    LaunchedEffect(conversationId, currentUserId) {
+    DisposableEffect(currentUserId) {
         if (currentUserId.isNotBlank()) {
-            viewModel.startRealtime(currentUserId)
+            viewModel.acquireRealtime(currentUserId)
         }
+        onDispose {
+            if (currentUserId.isNotBlank()) {
+                viewModel.releaseRealtime()
+            }
+        }
+    }
+
+    LaunchedEffect(conversationId, currentUserId) {
         viewModel.enterConversation(conversationId)
         if (conv == null && currentUserId.isNotBlank()) {
             viewModel.loadConversations(currentUserId)
         }
         viewModel.loadThread(conversationId, silent = false)
-        while (true) {
-            delay(4500L)
-            viewModel.loadThread(conversationId, silent = true)
+    }
+
+    LaunchedEffect(conversationId, isRealtimeConnected) {
+        if (!isRealtimeConnected) {
+            while (true) {
+                delay(45_000L)
+                viewModel.loadThread(conversationId, silent = true)
+            }
         }
     }
 

@@ -53,7 +53,6 @@ fun HomeScreen(
     viewModel: HomeViewModel,
     wishlistIds: Set<String>,
     contentMaxWidth: Dp,
-    showBottomBar: Boolean,
     topBar: @Composable (fillProgress: Float) -> Unit,
     onCategoryClick: (String) -> Unit,
     onSeeAllCategories: () -> Unit,
@@ -100,10 +99,7 @@ fun HomeScreen(
             onRefresh = { viewModel.loadHome(isRefresh = true) },
             modifier = Modifier
                 .fillMaxSize()
-                .then(
-                    if (showBottomBar) Modifier.navigationBarsPadding().padding(bottom = 63.dp)
-                    else Modifier.navigationBarsPadding()
-                )
+                .navigationBarsPadding()
         ) {
             LazyColumn(
                 state = listState,

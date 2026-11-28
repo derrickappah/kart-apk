@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -78,6 +79,7 @@ fun AdminDashboardScreen(
     currentUserId: String = "",
     viewModel: AdminViewModel,
     onBuyNowSettingChanged: (Boolean) -> Unit = {},
+    onPlatformSettingsChanged: () -> Unit = {},
     onOpenProduct: (String) -> Unit = {},
     onOpenSeller: (String) -> Unit = {},
     onOpenOrder: (String) -> Unit = {},
@@ -87,7 +89,7 @@ fun AdminDashboardScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tabs = listOf(
         "Overview", "Users", "Listings", "Orders", "KYC",
-        "Withdrawals", "Refunds", "Reports", "Deletions", "Reviews", "Ads", "Campuses", "Site Settings"
+        "Withdrawals", "Refunds", "Reports", "Deletions", "Reviews", "Ads", "Plans", "Campuses", "Site Settings"
     )
     var selectedTab by remember { mutableStateOf("Overview") }
     var searchQuery by remember { mutableStateOf("") }
@@ -98,6 +100,9 @@ fun AdminDashboardScreen(
     var showCampusDialog by remember { mutableStateOf(false) }
     var editingCampus by remember { mutableStateOf<com.example.domain.model.CampusRow?>(null) }
     var rejectingKycId by remember { mutableStateOf<String?>(null) }
+    var manualApproveWithdrawalId by remember { mutableStateOf<String?>(null) }
+    var showPlanDialog by remember { mutableStateOf(false) }
+    var editingPlan by remember { mutableStateOf<com.example.domain.model.SubscriptionPlan?>(null) }
 
     fun navigateToTab(tab: String, filter: String = "All", query: String = "") {
         selectedTab = tab
@@ -129,6 +134,20 @@ fun AdminDashboardScreen(
     }
     LaunchedEffect(state.feedback) {
         state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
+    }
+    LaunchedEffect(selectedTab, searchQuery, selectedFilter) {
+        if (selectedTab == "Users" || selectedTab == "Listings") {
+            kotlinx.coroutines.delay(350L)
+            when (selectedTab) {
+                "Users" -> viewModel.searchUsersRemote(searchQuery, selectedFilter)
+                "Listings" -> viewModel.searchProductsRemote(searchQuery, selectedFilter)
+            }
+        }
+    }
+
+    val listState = rememberLazyListState()
+    LaunchedEffect(selectedTab) {
+        listState.scrollToItem(0)
     }
 
     val bundle = state.bundle
@@ -167,7 +186,7 @@ fun AdminDashboardScreen(
                     "Withdrawals" -> stats.pendingWithdrawals
                     "Refunds" -> stats.pendingRefunds
                     "Reports" -> stats.openReports
-                    "Deletions" -> bundle?.deletionRequests?.count { AdminConsoleHelpers.isPendingStatus(it.status) } ?: 0
+                    "Deletions" -> stats.pendingDeletions
                     else -> 0
                 }
                 val label = if (badge > 0) "$t ($badge)" else t
@@ -218,6 +237,7 @@ fun AdminDashboardScreen(
                 "KYC", "Withdrawals", "Refunds", "Deletions" -> listOf("All", "Pending", "Approved", "Rejected")
                 "Reports" -> listOf("All", "Open", "Product", "User", "Resolved")
                 "Ads" -> listOf("All", "Active", "Paused", "Ended")
+                "Plans" -> listOf("All", "Plans", "Subscriptions")
                 else -> emptyList()
             }
             if (filterOptions.isNotEmpty()) {
@@ -243,6 +263,7 @@ fun AdminDashboardScreen(
             val ordersById = bundle?.ordersById.orEmpty()
             val productsById = bundle?.productsById.orEmpty()
             LazyColumn(
+                state = listState,
                 contentPadding = PaddingValues(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxSize()
@@ -267,11 +288,29 @@ fun AdminDashboardScreen(
                     }
 
                     "Users" -> {
-                        val filtered = AdminConsoleHelpers.filterUsers(bundle?.users.orEmpty(), searchQuery, selectedFilter)
-                        if (filtered.isEmpty()) {
+                        val remoteList = state.remoteUsers
+                        val displayed = remoteList ?: AdminConsoleHelpers.filterUsers(bundle?.users.orEmpty(), searchQuery, selectedFilter)
+                        val hasMoreUsers = if (remoteList != null) state.remoteUsersHasMore else (bundle?.usersHasMore == true)
+                        if (state.searchingUsers) {
+                            item(key = "users_searching") {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                ) {
+                                    CircularProgressIndicator(strokeWidth = 2.dp, color = KartPrimary, modifier = Modifier.size(16.dp))
+                                    Text(
+                                        text = "Searching all ${stats.totalUsers} users...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartThemeTokens.colors.textSecondary
+                                    )
+                                }
+                            }
+                        }
+                        if (displayed.isEmpty() && !state.searchingUsers) {
                             item { AdminEmptyTabState("No matching users", "Try adjusting your search or filter.") }
                         } else {
-                            items(filtered, key = { it.id }) { user ->
+                            items(displayed, key = { it.id }) { user ->
                                 val isSelf = currentUserId.isNotBlank() && user.id == currentUserId
                                 AdminCard(
                                     title = user.resolvedName,
@@ -295,6 +334,7 @@ fun AdminDashboardScreen(
                                         val nextBan = user.banned != true
                                         KartOutlineButton(
                                             text = if (user.banned == true) "Unban User" else "Suspend User",
+                                            enabled = !state.actionLoading,
                                             borderColor = if (user.banned == true) KartSuccess else KartDanger,
                                             contentColor = if (user.banned == true) KartSuccess else KartDanger,
                                             onClick = {
@@ -307,16 +347,49 @@ fun AdminDashboardScreen(
                                     }
                                 }
                             }
+                            if (hasMoreUsers) {
+                                item(key = "users_load_more") {
+                                    KartOutlineButton(
+                                        text = when {
+                                            state.loadingMoreUsers -> "Loading more users..."
+                                            remoteList != null -> "Load More Matching Users (${displayed.size} loaded)"
+                                            else -> "Load More Users (${displayed.size} of ${stats.totalUsers})"
+                                        },
+                                        enabled = !state.loadingMoreUsers && !state.actionLoading,
+                                        onClick = { viewModel.loadMoreUsers() },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
                         }
                     }
 
                     "Listings" -> {
-                        val filtered = AdminConsoleHelpers.filterProducts(bundle?.products.orEmpty(), usersById, searchQuery, selectedFilter)
-                        if (filtered.isEmpty()) {
+                        val remoteList = state.remoteProducts
+                        val displayed = remoteList ?: AdminConsoleHelpers.filterProducts(bundle?.products.orEmpty(), usersById, searchQuery, selectedFilter)
+                        val hasMoreProducts = if (remoteList != null) state.remoteProductsHasMore else (bundle?.productsHasMore == true)
+                        if (state.searchingProducts) {
+                            item(key = "products_searching") {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                ) {
+                                    CircularProgressIndicator(strokeWidth = 2.dp, color = KartPrimary, modifier = Modifier.size(16.dp))
+                                    Text(
+                                        text = "Searching all ${stats.totalListings} listings...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = KartThemeTokens.colors.textSecondary
+                                    )
+                                }
+                            }
+                        }
+                        if (displayed.isEmpty() && !state.searchingProducts) {
                             item { AdminEmptyTabState("No matching listings", "Try adjusting your search or filter.") }
                         } else {
-                            items(filtered, key = { it.id }) { p ->
+                            items(displayed, key = { it.id }) { p ->
                                 val seller = p.sellerId?.let { usersById[it] }
+                                val isSuspended = p.status.equals("Banned", true) || p.status.equals("Suspended", true)
                                 AdminCard(
                                     title = p.title,
                                     subtitle = listOfNotNull(
@@ -327,7 +400,7 @@ fun AdminDashboardScreen(
                                     leading = p.primaryImage?.let { url ->
                                         {
                                             AsyncImage(
-                                                model = url,
+                                                model = KartFormatters.buildOptimizedImageUrl(url, KartFormatters.ImageVariant.CARD),
                                                 contentDescription = p.title,
                                                 contentScale = ContentScale.Crop,
                                                 modifier = Modifier.size(48.dp).clip(RoundedCornerShape(10.dp))
@@ -346,12 +419,13 @@ fun AdminDashboardScreen(
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         KartPrimaryButton(
                                             text = "Activate",
-                                            enabled = !p.status.equals("Active", true),
+                                            enabled = !state.actionLoading && !p.status.equals("Active", true),
                                             onClick = { viewModel.updateProductStatus(p.id, "Active") },
                                             modifier = Modifier.weight(1f)
                                         )
                                         KartOutlineButton(
                                             text = "Suspend",
+                                            enabled = !state.actionLoading && !isSuspended,
                                             borderColor = KartDanger,
                                             contentColor = KartDanger,
                                             onClick = {
@@ -363,6 +437,20 @@ fun AdminDashboardScreen(
                                             modifier = Modifier.weight(1f)
                                         )
                                     }
+                                }
+                            }
+                            if (hasMoreProducts) {
+                                item(key = "products_load_more") {
+                                    KartOutlineButton(
+                                        text = when {
+                                            state.loadingMoreProducts -> "Loading more listings..."
+                                            remoteList != null -> "Load More Matching Listings (${displayed.size} loaded)"
+                                            else -> "Load More Listings (${displayed.size} of ${stats.totalListings})"
+                                        },
+                                        enabled = !state.loadingMoreProducts && !state.actionLoading,
+                                        onClick = { viewModel.loadMoreProducts() },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
                                 }
                             }
                         }
@@ -387,7 +475,7 @@ fun AdminDashboardScreen(
                                     leading = o.product?.primaryImage?.let { url ->
                                         {
                                             AsyncImage(
-                                                model = url,
+                                                model = KartFormatters.buildOptimizedImageUrl(url, KartFormatters.ImageVariant.CARD),
                                                 contentDescription = o.product.title,
                                                 contentScale = ContentScale.Crop,
                                                 modifier = Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))
@@ -446,6 +534,7 @@ fun AdminDashboardScreen(
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             KartPrimaryButton(
                                                 text = "Approve",
+                                                enabled = !state.actionLoading,
                                                 onClick = {
                                                     pendingConfirm = Triple(
                                                         "Approve KYC Verification?",
@@ -456,6 +545,7 @@ fun AdminDashboardScreen(
                                             )
                                             KartOutlineButton(
                                                 text = "Reject",
+                                                enabled = !state.actionLoading,
                                                 borderColor = KartDanger,
                                                 contentColor = KartDanger,
                                                 onClick = { rejectingKycId = v.id },
@@ -476,12 +566,13 @@ fun AdminDashboardScreen(
                             items(filtered, key = { it.id }) { w ->
                                 val requester = w.userId?.let { usersById[it] }
                                 val isPending = AdminConsoleHelpers.isPendingStatus(w.status)
+                                val summary = w.resolvedAccountSummary
                                 AdminCard(
                                     title = "${KartFormatters.formatCedis(w.amount)} • ${requester?.resolvedName ?: "Seller"}",
                                     subtitle = listOfNotNull(
                                         requester?.email,
                                         w.payoutMethod ?: "MoMo",
-                                        w.accountDetails?.takeIf { it.isNotBlank() }
+                                        summary
                                     ).joinToString(" • "),
                                     badge = {
                                         val approved = w.status.equals("Approved", true) || w.status.equals("Completed", true)
@@ -505,16 +596,18 @@ fun AdminDashboardScreen(
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             KartPrimaryButton(
                                                 text = "Approve",
+                                                enabled = !state.actionLoading,
                                                 onClick = {
                                                     pendingConfirm = Triple(
                                                         "Approve Withdrawal?",
-                                                        "Release ${KartFormatters.formatCedis(w.amount)} via ${w.payoutMethod ?: "MoMo"} to ${w.accountDetails ?: "the listed account"}?"
+                                                        "Release ${KartFormatters.formatCedis(w.amount)} via ${w.payoutMethod ?: "MoMo"} to ${summary ?: "the listed account"}?"
                                                     ) { viewModel.resolveWithdrawal(w.id, true) }
                                                 },
                                                 modifier = Modifier.weight(1f)
                                             )
                                             KartOutlineButton(
                                                 text = "Reject",
+                                                enabled = !state.actionLoading,
                                                 borderColor = KartDanger,
                                                 contentColor = KartDanger,
                                                 onClick = {
@@ -586,6 +679,7 @@ fun AdminDashboardScreen(
                                             )
                                             KartOutlineButton(
                                                 text = "Reject",
+                                                enabled = !state.actionLoading,
                                                 borderColor = KartDanger,
                                                 contentColor = KartDanger,
                                                 onClick = {
@@ -670,6 +764,7 @@ fun AdminDashboardScreen(
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             KartPrimaryButton(
                                                 text = "Approve",
+                                                enabled = !state.actionLoading,
                                                 onClick = {
                                                     pendingConfirm = Triple(
                                                         "Approve Account Deletion?",
@@ -680,6 +775,7 @@ fun AdminDashboardScreen(
                                             )
                                             KartOutlineButton(
                                                 text = "Reject",
+                                                enabled = !state.actionLoading,
                                                 borderColor = KartDanger,
                                                 contentColor = KartDanger,
                                                 onClick = {
@@ -729,7 +825,7 @@ fun AdminDashboardScreen(
                                 val product = ad.product ?: ad.productId?.let { productsById[it] }
                                 AdminCard(
                                     title = product?.title ?: "${ad.adType ?: "Promotion"} #${ad.id.take(8)}",
-                                    subtitle = "${ad.adType ?: "Boost"} • ${ad.views ?: 0} views • ${ad.clicks ?: 0} clicks • ${KartFormatters.formatCedis(ad.price)}",
+                                    subtitle = "${ad.adType ?: "Boost"} • ${ad.views ?: 0} views • ${ad.clicks ?: 0} clicks • ${KartFormatters.formatCedis(ad.resolvedPrice)}",
                                     badge = {
                                         StatusPill(
                                             text = ad.status ?: "Active",
@@ -739,6 +835,154 @@ fun AdminDashboardScreen(
                                     },
                                     onClick = { activeDetail = AdminDetailTarget.Ad(ad) }
                                 ) {}
+                            }
+                        }
+                    }
+
+                    "Plans" -> {
+                        val q = searchQuery.trim().lowercase()
+                        val showPlans = selectedFilter != "Subscriptions"
+                        val showSubs = selectedFilter != "Plans"
+                        if (showPlans) {
+                            item(key = "add_plan_btn") {
+                                KartPrimaryButton(
+                                    text = "+ Add Subscription Plan",
+                                    enabled = !state.actionLoading,
+                                    onClick = {
+                                        editingPlan = null
+                                        showPlanDialog = true
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            val filteredPlans = bundle?.subscriptionPlans.orEmpty().filter { plan ->
+                                q.isEmpty() || plan.name.lowercase().contains(q) ||
+                                    plan.features.orEmpty().any { it.lowercase().contains(q) }
+                            }
+                            if (filteredPlans.isEmpty()) {
+                                item(key = "plans_empty") { AdminEmptyTabState("No matching subscription plans", "Add a plan or adjust your search.") }
+                            } else {
+                                items(filteredPlans, key = { "plan_${it.id}" }) { plan ->
+                                    AdminCard(
+                                        title = plan.name,
+                                        subtitle = listOfNotNull(
+                                            if (plan.price <= 0.0) "Free" else KartFormatters.formatCedis(plan.price),
+                                            "${plan.durationMonths} mo",
+                                            plan.features.orEmpty().take(3).joinToString(", ").takeIf { it.isNotBlank() }
+                                        ).joinToString(" • "),
+                                        badge = {
+                                            StatusPill(
+                                                text = if (plan.price <= 0.0) "Free" else KartFormatters.formatCedis(plan.price),
+                                                containerColor = KartPrimary.copy(alpha = 0.14f),
+                                                contentColor = KartPrimary
+                                            )
+                                        }
+                                    ) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            KartOutlineButton(
+                                                text = "Edit",
+                                                enabled = !state.actionLoading,
+                                                onClick = {
+                                                    editingPlan = plan
+                                                    showPlanDialog = true
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            KartOutlineButton(
+                                                text = "Delete",
+                                                enabled = !state.actionLoading,
+                                                borderColor = KartDanger,
+                                                contentColor = KartDanger,
+                                                onClick = {
+                                                    pendingConfirm = Triple(
+                                                        "Delete Plan?",
+                                                        "Delete subscription plan \"${plan.name}\"?"
+                                                    ) { viewModel.deleteSubscriptionPlan(plan.id) }
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (showSubs) {
+                            val filteredSubs = bundle?.subscriptions.orEmpty().filter { sub ->
+                                val subscriber = sub.userId?.let { usersById[it] }
+                                q.isEmpty() || listOfNotNull(
+                                    sub.id,
+                                    sub.status,
+                                    sub.paymentReference,
+                                    sub.plan?.name,
+                                    subscriber?.resolvedName,
+                                    subscriber?.email
+                                ).any { it.lowercase().contains(q) }
+                            }
+                            item(key = "subs_header") {
+                                Text(
+                                    text = "User Subscriptions (${filteredSubs.size})",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = KartThemeTokens.colors.textSecondary,
+                                    modifier = Modifier.padding(top = if (showPlans) 6.dp else 0.dp)
+                                )
+                            }
+                            if (filteredSubs.isEmpty()) {
+                                item(key = "subs_empty") { AdminEmptyTabState("No matching user subscriptions", "No subscriptions match your filter.") }
+                            } else {
+                                items(filteredSubs, key = { "sub_${it.id}" }) { sub ->
+                                    val subscriber = sub.userId?.let { usersById[it] }
+                                    val isActiveSub = sub.status.equals("Active", true)
+                                    val isCancelledSub = sub.status.equals("Cancelled", true)
+                                    AdminCard(
+                                        title = "${subscriber?.resolvedName ?: sub.userId?.take(8) ?: "User"} • ${sub.plan?.name ?: "Plan"}",
+                                        subtitle = listOfNotNull(
+                                            subscriber?.email,
+                                            sub.paymentReference,
+                                            sub.endDate?.let { "Ends ${KartFormatters.timeAgo(it)}" }
+                                        ).joinToString(" • "),
+                                        badge = {
+                                            StatusPill(
+                                                text = sub.status ?: "Pending",
+                                                containerColor = when {
+                                                    isActiveSub -> KartSuccessContainer
+                                                    isCancelledSub -> KartDangerContainer
+                                                    else -> KartWarningContainer
+                                                },
+                                                contentColor = when {
+                                                    isActiveSub -> KartSuccess
+                                                    isCancelledSub -> KartDanger
+                                                    else -> KartWarning
+                                                }
+                                            )
+                                        },
+                                        onClick = {
+                                            subscriber?.let { activeDetail = AdminDetailTarget.User(it) }
+                                        }
+                                    ) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            KartPrimaryButton(
+                                                text = "Activate",
+                                                enabled = !state.actionLoading && !isActiveSub,
+                                                onClick = { viewModel.updateSubscriptionStatus(sub.id, "Active") },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            KartOutlineButton(
+                                                text = "Cancel",
+                                                enabled = !state.actionLoading && !isCancelledSub,
+                                                borderColor = KartDanger,
+                                                contentColor = KartDanger,
+                                                onClick = {
+                                                    pendingConfirm = Triple(
+                                                        "Cancel Subscription?",
+                                                        "Mark ${subscriber?.resolvedName ?: "this user"}'s ${sub.plan?.name ?: "subscription"} as Cancelled?"
+                                                    ) { viewModel.updateSubscriptionStatus(sub.id, "Cancelled") }
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -756,6 +1000,7 @@ fun AdminDashboardScreen(
                             )
                         }
                         val filtered = AdminConsoleHelpers.filterCampuses(bundle?.campuses.orEmpty(), searchQuery)
+                        val loadedPrefix = if ((bundle?.users?.size ?: 0) < stats.totalUsers || (bundle?.products?.size ?: 0) < stats.totalListings) "loaded " else ""
                         if (filtered.isEmpty()) {
                             item { AdminEmptyTabState("No matching campuses", "Try adjusting your search or add a new campus.") }
                         } else {
@@ -764,7 +1009,7 @@ fun AdminDashboardScreen(
                                 val listingCount = bundle?.products?.count { it.campus.equals(c.name, true) && it.isActiveListing } ?: 0
                                 AdminCard(
                                     title = c.name,
-                                    subtitle = "${c.abbreviation ?: "Campus"} • $userCount users • $listingCount active listings",
+                                    subtitle = "${c.abbreviation ?: "Campus"} • $userCount ${loadedPrefix}users • $listingCount ${loadedPrefix}active listings",
                                     onClick = { activeDetail = AdminDetailTarget.Campus(c) }
                                 ) {}
                             }
@@ -772,8 +1017,9 @@ fun AdminDashboardScreen(
                     }
 
                     "Site Settings" -> item {
-                        val buyNowEnabled = bundle?.buyNowEnabled ?: true
-                        val maintenanceMode = bundle?.isMaintenanceMode ?: false
+                        val flags = bundle?.platformFlags ?: com.example.domain.model.PlatformFlags()
+                        val buyNowEnabled = bundle?.buyNowEnabled ?: flags.buyNowEnabled
+                        val maintenanceMode = bundle?.isMaintenanceMode ?: flags.isMaintenanceMode
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -826,9 +1072,17 @@ fun AdminDashboardScreen(
                                                     pendingConfirm = Triple(
                                                         "Turn Off Buy Now?",
                                                         "This hides the Buy Now button on all product detail pages and pauses direct checkout until you turn it back on."
-                                                    ) { viewModel.setBuyNowEnabled(false, onBuyNowSettingChanged) }
+                                                    ) {
+                                                        viewModel.setBuyNowEnabled(false) { enabled ->
+                                                            onBuyNowSettingChanged(enabled)
+                                                            onPlatformSettingsChanged()
+                                                        }
+                                                    }
                                                 } else {
-                                                    viewModel.setBuyNowEnabled(true, onBuyNowSettingChanged)
+                                                    viewModel.setBuyNowEnabled(true) { enabled ->
+                                                        onBuyNowSettingChanged(enabled)
+                                                        onPlatformSettingsChanged()
+                                                    }
                                                 }
                                             },
                                             colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = KartPrimary),
@@ -860,7 +1114,7 @@ fun AdminDashboardScreen(
                                                     if (nextEnabled) "Enable Maintenance Mode?" else "Disable Maintenance Mode?",
                                                     if (nextEnabled) "Non-admin users will see a maintenance notice until you disable it."
                                                     else "Restore normal marketplace access for all users?"
-                                                ) { viewModel.setMaintenanceMode(nextEnabled) }
+                                                ) { viewModel.setMaintenanceMode(nextEnabled) { onPlatformSettingsChanged() } }
                                             },
                                             colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = KartWarning)
                                         )
@@ -868,21 +1122,21 @@ fun AdminDashboardScreen(
                                 }
                             }
 
-                            var boostInput by remember(bundle?.promoBoostRate) {
-                                mutableStateOf(KartFormatters.formatPrice(bundle?.promoBoostRate ?: 15.0))
+                            var dailyInput by remember(flags.promoDailyPrice) {
+                                mutableStateOf(formatEditableDecimal(flags.promoDailyPrice))
                             }
-                            var featuredInput by remember(bundle?.promoFeaturedRate) {
-                                mutableStateOf(KartFormatters.formatPrice(bundle?.promoFeaturedRate ?: 35.0))
+                            var weeklyInput by remember(flags.promoWeeklyPrice) {
+                                mutableStateOf(formatEditableDecimal(flags.promoWeeklyPrice))
                             }
-                            var campusAdInput by remember(bundle?.promoCampusAdRate) {
-                                mutableStateOf(KartFormatters.formatPrice(bundle?.promoCampusAdRate ?: 65.0))
+                            var featuredInput by remember(flags.promoFeaturedPrice) {
+                                mutableStateOf(formatEditableDecimal(flags.promoFeaturedPrice))
                             }
-                            val parsedBoost = boostInput.toDoubleOrNull()
-                            val parsedFeatured = featuredInput.toDoubleOrNull()
-                            val parsedCampusAd = campusAdInput.toDoubleOrNull()
-                            val ratesValid = parsedBoost != null && parsedBoost > 0.0 &&
-                                parsedFeatured != null && parsedFeatured > 0.0 &&
-                                parsedCampusAd != null && parsedCampusAd > 0.0
+                            val parsedDaily = dailyInput.trim().toDoubleOrNull()
+                            val parsedWeekly = weeklyInput.trim().toDoubleOrNull()
+                            val parsedFeatured = featuredInput.trim().toDoubleOrNull()
+                            val ratesValid = parsedDaily != null && parsedDaily >= 0.0 &&
+                                parsedWeekly != null && parsedWeekly >= 0.0 &&
+                                parsedFeatured != null && parsedFeatured >= 0.0
 
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -894,46 +1148,190 @@ fun AdminDashboardScreen(
                                     modifier = Modifier.fillMaxWidth().padding(16.dp)
                                 ) {
                                     Text(
-                                        text = "Promotion Rates (GHS)",
+                                        text = "Promotion Pricing (GHS)",
                                         style = MaterialTheme.typography.labelLarge,
                                         fontWeight = FontWeight.Bold,
                                         color = KartThemeTokens.colors.textSecondary
                                     )
                                     Text(
-                                        text = "Configure pricing for seller listing promotions across Kart.",
+                                        text = "Live promotion tier prices synced with seller Boost & Featured checkout.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = KartThemeTokens.colors.textSecondary
                                     )
                                     KartTextField(
-                                        value = boostInput,
-                                        onValueChange = { boostInput = KartFormatters.sanitizeDecimalInput(it) },
-                                        label = "Boost Rate (GHS)",
-                                        placeholder = "15.00"
+                                        value = dailyInput,
+                                        onValueChange = { dailyInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Daily Boost Price (24h, GHS)",
+                                        placeholder = "5.00"
+                                    )
+                                    KartTextField(
+                                        value = weeklyInput,
+                                        onValueChange = { weeklyInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Weekly Boost Price (7d, GHS)",
+                                        placeholder = "25.00"
                                     )
                                     KartTextField(
                                         value = featuredInput,
                                         onValueChange = { featuredInput = KartFormatters.sanitizeDecimalInput(it) },
-                                        label = "Featured Rate (GHS)",
-                                        placeholder = "35.00"
-                                    )
-                                    KartTextField(
-                                        value = campusAdInput,
-                                        onValueChange = { campusAdInput = KartFormatters.sanitizeDecimalInput(it) },
-                                        label = "Campus Ad Rate (GHS)",
-                                        placeholder = "65.00"
+                                        label = "Featured Listing Price (30d, GHS)",
+                                        placeholder = "50.00"
                                     )
                                     KartPrimaryButton(
-                                        text = "Save Promotion Rates",
+                                        text = "Save Promotion Pricing",
                                         enabled = !state.actionLoading && ratesValid,
                                         onClick = {
-                                            val b = parsedBoost ?: return@KartPrimaryButton
+                                            val d = parsedDaily ?: return@KartPrimaryButton
+                                            val w = parsedWeekly ?: return@KartPrimaryButton
                                             val f = parsedFeatured ?: return@KartPrimaryButton
-                                            val c = parsedCampusAd ?: return@KartPrimaryButton
                                             pendingConfirm = Triple(
-                                                "Update Promotion Rates?",
-                                                "Set Boost to ${KartFormatters.formatCedis(b)}, Featured to ${KartFormatters.formatCedis(f)}, and Campus Ad to ${KartFormatters.formatCedis(c)}?"
+                                                "Update Promotion Pricing?",
+                                                "Set Daily Boost to ${KartFormatters.formatCedis(d)}, Weekly Boost to ${KartFormatters.formatCedis(w)}, and Featured Listing to ${KartFormatters.formatCedis(f)}?"
                                             ) {
-                                                viewModel.updatePromotionRates(b, f, c)
+                                                viewModel.updatePromotionRates(d, w, f) {
+                                                    onPlatformSettingsChanged()
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+
+                            var serviceFeeInput by remember(flags.marketplaceServiceFee) {
+                                mutableStateOf(formatEditableDecimal(flags.marketplaceServiceFee))
+                            }
+                            var txFixedInput by remember(flags.transactionFeeFixed) {
+                                mutableStateOf(formatEditableDecimal(flags.transactionFeeFixed))
+                            }
+                            var txPercentInput by remember(flags.transactionFeePercent) {
+                                mutableStateOf(formatEditableDecimal(flags.transactionFeePercent))
+                            }
+                            var withdrawalFeeInput by remember(flags.withdrawalFeeFlat) {
+                                mutableStateOf(formatEditableDecimal(flags.withdrawalFeeFlat))
+                            }
+                            var minDepositInput by remember(flags.minDepositAmount) {
+                                mutableStateOf(formatEditableDecimal(flags.minDepositAmount))
+                            }
+                            var minWithdrawalInput by remember(flags.minWithdrawalAmount) {
+                                mutableStateOf(formatEditableDecimal(flags.minWithdrawalAmount))
+                            }
+                            var maxPriceInput by remember(flags.maxListingPrice) {
+                                mutableStateOf(formatEditableDecimal(flags.maxListingPrice))
+                            }
+                            var supportEmailInput by remember(flags.supportEmail) {
+                                mutableStateOf(flags.supportEmail)
+                            }
+                            var whatsappInput by remember(flags.whatsappSupportNumber) {
+                                mutableStateOf(flags.whatsappSupportNumber)
+                            }
+
+                            val pServiceFee = serviceFeeInput.trim().toDoubleOrNull()
+                            val pTxFixed = txFixedInput.trim().toDoubleOrNull()
+                            val pTxPercent = txPercentInput.trim().toDoubleOrNull()
+                            val pWithdrawalFee = withdrawalFeeInput.trim().toDoubleOrNull()
+                            val pMinDeposit = minDepositInput.trim().toDoubleOrNull()
+                            val pMinWithdrawal = minWithdrawalInput.trim().toDoubleOrNull()
+                            val pMaxPrice = maxPriceInput.trim().toDoubleOrNull()
+                            val financialValid = pServiceFee != null && pServiceFee >= 0.0 &&
+                                pTxFixed != null && pTxFixed >= 0.0 &&
+                                pTxPercent != null && pTxPercent >= 0.0 &&
+                                pWithdrawalFee != null && pWithdrawalFee >= 0.0 &&
+                                pMinDeposit != null && pMinDeposit >= 0.0 &&
+                                pMinWithdrawal != null && pMinWithdrawal >= 0.0 &&
+                                pMaxPrice != null && pMaxPrice > 0.0 &&
+                                supportEmailInput.trim().isNotBlank()
+
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(16.dp)
+                                ) {
+                                    Text(
+                                        text = "Fees, Limits & Support",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = KartThemeTokens.colors.textSecondary
+                                    )
+                                    KartTextField(
+                                        value = serviceFeeInput,
+                                        onValueChange = { serviceFeeInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Marketplace Service Fee (GHS)",
+                                        placeholder = "2"
+                                    )
+                                    KartTextField(
+                                        value = txFixedInput,
+                                        onValueChange = { txFixedInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Transaction Fee Flat (GHS)",
+                                        placeholder = "1"
+                                    )
+                                    KartTextField(
+                                        value = txPercentInput,
+                                        onValueChange = { txPercentInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Transaction Fee (%)",
+                                        placeholder = "0"
+                                    )
+                                    KartTextField(
+                                        value = withdrawalFeeInput,
+                                        onValueChange = { withdrawalFeeInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Withdrawal Fee Flat (GHS)",
+                                        placeholder = "1"
+                                    )
+                                    KartTextField(
+                                        value = minDepositInput,
+                                        onValueChange = { minDepositInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Minimum Deposit (GHS)",
+                                        placeholder = "10"
+                                    )
+                                    KartTextField(
+                                        value = minWithdrawalInput,
+                                        onValueChange = { minWithdrawalInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Minimum Withdrawal (GHS)",
+                                        placeholder = "10"
+                                    )
+                                    KartTextField(
+                                        value = maxPriceInput,
+                                        onValueChange = { maxPriceInput = KartFormatters.sanitizeDecimalInput(it) },
+                                        label = "Max Listing Price (GHS)",
+                                        placeholder = "50000"
+                                    )
+                                    KartTextField(
+                                        value = supportEmailInput,
+                                        onValueChange = { supportEmailInput = it },
+                                        label = "Platform Support Email",
+                                        placeholder = "support@kart.com"
+                                    )
+                                    KartTextField(
+                                        value = whatsappInput,
+                                        onValueChange = { whatsappInput = it },
+                                        label = "WhatsApp Support Number",
+                                        placeholder = "+233500502158"
+                                    )
+                                    KartPrimaryButton(
+                                        text = "Save Fees, Limits & Support",
+                                        enabled = !state.actionLoading && financialValid,
+                                        onClick = {
+                                            pendingConfirm = Triple(
+                                                "Save Platform Settings?",
+                                                "Update platform fees, wallet limits, and support contact settings live across Kart?"
+                                            ) {
+                                                viewModel.savePlatformSettings(
+                                                    updates = listOf(
+                                                        com.example.data.repository.KartRepository.KEY_MARKETPLACE_SERVICE_FEE to (pServiceFee ?: 2.0),
+                                                        com.example.data.repository.KartRepository.KEY_TRANSACTION_FEE_FIXED to (pTxFixed ?: 1.0),
+                                                        com.example.data.repository.KartRepository.KEY_TRANSACTION_FEE_PERCENT to (pTxPercent ?: 0.0),
+                                                        com.example.data.repository.KartRepository.KEY_WITHDRAWAL_FEE_FLAT to (pWithdrawalFee ?: 1.0),
+                                                        com.example.data.repository.KartRepository.KEY_MIN_DEPOSIT_AMOUNT to (pMinDeposit ?: 10.0),
+                                                        com.example.data.repository.KartRepository.KEY_MIN_WITHDRAWAL_AMOUNT to (pMinWithdrawal ?: 10.0),
+                                                        com.example.data.repository.KartRepository.KEY_MAX_LISTING_PRICE to (pMaxPrice ?: 50000.0),
+                                                        com.example.data.repository.KartRepository.KEY_PLATFORM_SUPPORT_EMAIL to supportEmailInput.trim(),
+                                                        com.example.data.repository.KartRepository.KEY_WHATSAPP_SUPPORT_NUMBER to whatsappInput.trim()
+                                                    ),
+                                                    successMsg = "Fees, limits & support settings saved"
+                                                ) { onPlatformSettingsChanged() }
                                             }
                                         },
                                         modifier = Modifier.fillMaxWidth()
@@ -966,11 +1364,14 @@ fun AdminDashboardScreen(
             onFilterCampus = { tab, campusName -> navigateToTab(tab = tab, query = campusName) },
             onRequestConfirm = { title, message, action -> pendingConfirm = Triple(title, message, action) },
             onToggleBan = viewModel::toggleBan,
+            onToggleAdminRole = viewModel::toggleAdminRole,
             onUpdateProductStatus = viewModel::updateProductStatus,
             onDeleteProduct = viewModel::deleteProduct,
             onResolveVerification = viewModel::resolveVerification,
             onRequestRejectKyc = { kycId -> rejectingKycId = kycId },
             onResolveWithdrawal = viewModel::resolveWithdrawal,
+            onRequestManualApproveWithdrawal = { wid -> manualApproveWithdrawalId = wid },
+            onRetryWithdrawalPaystack = viewModel::retryWithdrawalPaystack,
             onResolveRefund = viewModel::resolveRefund,
             onEditCampus = { campus ->
                 editingCampus = campus
@@ -1028,6 +1429,128 @@ fun AdminDashboardScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showCampusDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showPlanDialog) {
+        var planName by remember(editingPlan) { mutableStateOf(editingPlan?.name.orEmpty()) }
+        var planPrice by remember(editingPlan) {
+            mutableStateOf(editingPlan?.let { formatEditableDecimal(it.price) } ?: "0")
+        }
+        var planMonths by remember(editingPlan) {
+            mutableStateOf((editingPlan?.durationMonths ?: 1).toString())
+        }
+        var planFeatures by remember(editingPlan) {
+            mutableStateOf(editingPlan?.features.orEmpty().joinToString("\n"))
+        }
+        val parsedPrice = planPrice.toDoubleOrNull()
+        val parsedMonths = planMonths.toIntOrNull()
+        val planValid = planName.trim().isNotBlank() &&
+            parsedPrice != null && parsedPrice >= 0.0 &&
+            parsedMonths != null && parsedMonths >= 1
+        val isEditingPlan = editingPlan != null
+        AlertDialog(
+            onDismissRequest = { showPlanDialog = false },
+            title = { Text(if (isEditingPlan) "Edit Subscription Plan" else "Add Subscription Plan", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    KartTextField(
+                        value = planName,
+                        onValueChange = { planName = it },
+                        label = "Plan Name",
+                        placeholder = "e.g. Monthly"
+                    )
+                    KartTextField(
+                        value = planPrice,
+                        onValueChange = { planPrice = KartFormatters.sanitizeDecimalInput(it) },
+                        label = "Price (GHS)",
+                        placeholder = "0.00"
+                    )
+                    KartTextField(
+                        value = planMonths,
+                        onValueChange = { planMonths = it.filter(Char::isDigit) },
+                        label = "Duration (Months)",
+                        placeholder = "1"
+                    )
+                    KartTextField(
+                        value = planFeatures,
+                        onValueChange = { planFeatures = it },
+                        label = "Features (one per line or comma-separated)",
+                        placeholder = "Unlimited listings\nPriority support"
+                    )
+                }
+            },
+            confirmButton = {
+                KartPrimaryButton(
+                    text = if (isEditingPlan) "Save" else "Create",
+                    enabled = planValid && !state.actionLoading,
+                    onClick = {
+                        val targetId = editingPlan?.id
+                        val featList = planFeatures.split("\n", ",").map { it.trim() }.filter { it.isNotBlank() }
+                        val priceVal = parsedPrice ?: 0.0
+                        val monthsVal = parsedMonths ?: 1
+                        showPlanDialog = false
+                        if (isEditingPlan && !targetId.isNullOrBlank()) {
+                            viewModel.updateSubscriptionPlan(targetId, planName.trim(), priceVal, monthsVal, featList)
+                        } else {
+                            viewModel.createSubscriptionPlan(planName.trim(), priceVal, monthsVal, featList)
+                        }
+                    }
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { showPlanDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    manualApproveWithdrawalId?.let { wid ->
+        var manualRef by remember(wid) { mutableStateOf("") }
+        var manualTxId by remember(wid) { mutableStateOf("") }
+        var manualNotes by remember(wid) { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { manualApproveWithdrawalId = null },
+            title = { Text("Manual Withdrawal Approval", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Mark this withdrawal as manually paid outside Paystack.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = KartThemeTokens.colors.textSecondary
+                    )
+                    KartTextField(
+                        value = manualRef,
+                        onValueChange = { manualRef = it },
+                        label = "Manual Reference (Optional)",
+                        placeholder = "e.g. MOMO-REF-123"
+                    )
+                    KartTextField(
+                        value = manualTxId,
+                        onValueChange = { manualTxId = it },
+                        label = "Transaction ID (Optional)",
+                        placeholder = "e.g. TXN-98765"
+                    )
+                    KartTextField(
+                        value = manualNotes,
+                        onValueChange = { manualNotes = it },
+                        label = "Notes (Optional)",
+                        placeholder = "Sent directly via MTN MoMo..."
+                    )
+                }
+            },
+            confirmButton = {
+                KartPrimaryButton(
+                    text = "Confirm Payout",
+                    enabled = !state.actionLoading,
+                    onClick = {
+                        manualApproveWithdrawalId = null
+                        viewModel.manualApproveWithdrawal(wid, manualRef, manualTxId, manualNotes)
+                    }
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { manualApproveWithdrawalId = null }) { Text("Cancel") }
             }
         )
     }
@@ -1109,6 +1632,13 @@ fun AdminDashboardScreen(
     }
 }
 
+private fun formatEditableDecimal(value: Double): String =
+    if (value % 1.0 == 0.0 && value <= 9_000_000_000_000.0 && value >= -9_000_000_000_000.0) {
+        value.toLong().toString()
+    } else {
+        String.format(java.util.Locale.US, "%.2f", value)
+    }
+
 @Composable
 private fun AdminTabStatsStrip(
     selectedTab: String,
@@ -1119,18 +1649,15 @@ private fun AdminTabStatsStrip(
         "Users" -> listOf(
             Triple("Total", "${stats.totalUsers}", KartPrimary),
             Triple("Verified", "${stats.verifiedUsers}", KartSuccess),
-            Triple("Admins", "${bundle.users.count { it.isAdmin == true }}", KartPrimary),
+            Triple("Admins", "${stats.adminUsers}", KartPrimary),
             Triple("Banned", "${stats.bannedUsers}", KartDanger)
         )
-        "Listings" -> {
-            val sold = bundle.products.count { it.status.equals("Sold", true) || it.isOutOfStock }
-            listOf(
-                Triple("Total", "${bundle.products.size}", KartPrimary),
-                Triple("Active", "${stats.activeListings}", KartSuccess),
-                Triple("Suspended", "${stats.suspendedListings}", KartDanger),
-                Triple("Sold", "$sold", KartWarning)
-            )
-        }
+        "Listings" -> listOf(
+            Triple("Total", "${stats.totalListings}", KartPrimary),
+            Triple("Active", "${stats.activeListings}", KartSuccess),
+            Triple("Suspended", "${stats.suspendedListings}", KartDanger),
+            Triple("Sold", "${stats.soldListings}", KartWarning)
+        )
         "Orders" -> {
             val completed = bundle.orders.count { it.status.equals("Completed", true) || it.status.equals("Delivered", true) }
             listOf(
@@ -1182,12 +1709,11 @@ private fun AdminTabStatsStrip(
             )
         }
         "Deletions" -> {
-            val pending = bundle.deletionRequests.count { AdminConsoleHelpers.isPendingStatus(it.status) }
             val approved = bundle.deletionRequests.count { it.status.equals("approved", true) }
             val rejected = bundle.deletionRequests.count { it.status.equals("rejected", true) }
             listOf(
                 Triple("Total", "${bundle.deletionRequests.size}", KartPrimary),
-                Triple("Pending", "$pending", KartWarning),
+                Triple("Pending", "${stats.pendingDeletions}", KartWarning),
                 Triple("Approved", "$approved", KartSuccess),
                 Triple("Rejected", "$rejected", KartDanger)
             )
@@ -1197,7 +1723,7 @@ private fun AdminTabStatsStrip(
             val fiveStar = bundle.reviews.count { it.rating == 5 }
             val lowStar = bundle.reviews.count { it.rating <= 2 }
             listOf(
-                Triple("Total", "${bundle.reviews.size}", KartPrimary),
+                Triple("Total", "${stats.totalReviews}", KartPrimary),
                 Triple("Avg", String.format("%.1f★", avg), KartWarning),
                 Triple("5-Star", "$fiveStar", KartSuccess),
                 Triple("Low", "$lowStar", KartDanger)
@@ -1213,6 +1739,16 @@ private fun AdminTabStatsStrip(
                 Triple("Clicks", "$clicks", KartWarning)
             )
         }
+        "Plans" -> {
+            val activeSubs = bundle.subscriptions.count { it.status.equals("Active", true) }
+            val pendingSubs = bundle.subscriptions.count { AdminConsoleHelpers.isPendingStatus(it.status) }
+            listOf(
+                Triple("Plans", "${bundle.subscriptionPlans.size}", KartPrimary),
+                Triple("Active", "$activeSubs", KartSuccess),
+                Triple("Pending", "$pendingSubs", KartWarning),
+                Triple("Subs", "${bundle.subscriptions.size}", KartPrimary)
+            )
+        }
         "Campuses" -> listOf(
             Triple("Campuses", "${bundle.campuses.size}", KartPrimary),
             Triple("Users", "${stats.totalUsers}", KartSuccess),
@@ -1221,7 +1757,7 @@ private fun AdminTabStatsStrip(
         "Site Settings" -> listOf(
             Triple("Buy Now", if (bundle.buyNowEnabled) "Active" else "Off", if (bundle.buyNowEnabled) KartSuccess else KartWarning),
             Triple("Store", if (bundle.isMaintenanceMode) "Maint." else "Live", if (bundle.isMaintenanceMode) KartWarning else KartSuccess),
-            Triple("Boost", KartFormatters.formatCedis(bundle.promoBoostRate), KartPrimary)
+            Triple("Daily", KartFormatters.formatCedis(bundle.platformFlags.promoDailyPrice), KartPrimary)
         )
         else -> emptyList()
     }

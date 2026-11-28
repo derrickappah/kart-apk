@@ -3,8 +3,11 @@ package com.example.data.remote
 import android.content.Context
 import android.util.Base64
 import com.example.BuildConfig
+import com.example.data.local.ChatCacheStore
+import com.example.data.local.KartDatabase
 import com.example.data.local.SessionStore
 import com.example.data.repository.KartRepository
+import com.example.data.upload.DirectR2Uploader
 import com.example.domain.model.UserSession
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -24,7 +27,9 @@ import retrofit2.converter.moshi.MoshiConverterFactory
 import java.util.concurrent.TimeUnit
 
 class KartAppContainer(context: Context) {
-    val sessionStore = SessionStore(context.applicationContext)
+    private val appContext = context.applicationContext
+    val sessionStore = SessionStore(appContext)
+    val database: KartDatabase by lazy { KartDatabase.build(appContext) }
 
     private val moshi: Moshi = Moshi.Builder()
         .addLast(KotlinJsonAdapterFactory())
@@ -254,7 +259,13 @@ class KartAppContainer(context: Context) {
         }
     }
 
+    private val httpCache = okhttp3.Cache(
+        java.io.File(context.applicationContext.cacheDir, "http_cache"),
+        25L * 1024 * 1024
+    )
+
     private val supabaseClient = OkHttpClient.Builder()
+        .cache(httpCache)
         .addInterceptor(supabaseAuthInterceptor)
         .authenticator(createTokenRefreshAuthenticator(isKartWeb = false))
         .addInterceptor(loggingInterceptor)
@@ -263,8 +274,12 @@ class KartAppContainer(context: Context) {
         .writeTimeout(25, TimeUnit.SECONDS)
         .build()
 
+    private val appCheckInterceptor = AppCheckInterceptor()
+
     private val kartWebClient = OkHttpClient.Builder()
+        .cache(httpCache)
         .addInterceptor(kartWebAuthInterceptor)
+        .addInterceptor(appCheckInterceptor)
         .authenticator(createTokenRefreshAuthenticator(isKartWeb = true))
         .addInterceptor(loggingInterceptor)
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -286,10 +301,28 @@ class KartAppContainer(context: Context) {
         .build()
         .create(KartWebApi::class.java)
 
+    val kartCursorApi: KartCursorApi = Retrofit.Builder()
+        .baseUrl(BuildConfig.KART_API_BASE_URL.trimEnd('/') + "/")
+        .client(kartWebClient)
+        .addConverterFactory(MoshiConverterFactory.create(moshi))
+        .build()
+        .create(KartCursorApi::class.java)
+
+    val directR2Uploader = DirectR2Uploader(
+        api = kartCursorApi,
+        directHttpClient = bareHttpClient
+    )
+
+    val chatCacheStore = ChatCacheStore(java.io.File(appContext.filesDir, "chat_cache"))
+
     val repository = KartRepository(
         supabaseApi = supabaseApi,
         kartWebApi = kartWebApi,
         sessionStore = sessionStore,
-        hasSupabaseKey = { hasValidSupabaseKey }
+        hasSupabaseKey = { hasValidSupabaseKey },
+        chatCacheStore = chatCacheStore,
+        kartCursorApi = kartCursorApi,
+        directR2Uploader = directR2Uploader,
+        databaseProvider = { database }
     )
 }

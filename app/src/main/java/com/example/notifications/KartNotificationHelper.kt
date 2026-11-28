@@ -16,12 +16,22 @@ import com.example.MainActivity
 import com.example.R
 
 object KartNotificationHelper {
+    const val CHANNEL_DEFAULT = "kart_default_channel"
     const val CHANNEL_MESSAGES = "kart_messages"
     const val CHANNEL_UPDATES = "kart_updates"
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+
+        val defaultChannel = NotificationChannel(
+            CHANNEL_DEFAULT,
+            "KART Notifications",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Order updates, messages, and marketplace alerts from KART"
+            enableVibration(true)
+        }
 
         val messagesChannel = NotificationChannel(
             CHANNEL_MESSAGES,
@@ -41,7 +51,7 @@ object KartNotificationHelper {
             enableVibration(true)
         }
 
-        manager.createNotificationChannels(listOf(messagesChannel, updatesChannel))
+        manager.createNotificationChannels(listOf(defaultChannel, messagesChannel, updatesChannel))
     }
 
     fun hasNotificationPermission(context: Context): Boolean {

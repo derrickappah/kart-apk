@@ -31,9 +31,9 @@ data class SessionUiState(
     val unreadNotifications: Int = 0,
     val isMaintenanceMode: Boolean = false,
     val buyNowEnabled: Boolean = true,
-    val promoBoostRate: Double = 15.0,
-    val promoFeaturedRate: Double = 35.0,
-    val promoCampusAdRate: Double = 65.0,
+    val promoDailyPrice: Double = 5.0,
+    val promoWeeklyPrice: Double = 25.0,
+    val promoFeaturedPrice: Double = 50.0,
     val isBanned: Boolean = false,
     val snackbarMessage: String? = null,
     val authLoading: Boolean = false,
@@ -62,10 +62,6 @@ class SessionViewModel(
     private val _pushAlerts = MutableSharedFlow<PushAlert>(extraBufferCapacity = 16)
     val pushAlerts: SharedFlow<PushAlert> = _pushAlerts.asSharedFlow()
 
-    private val seenNotificationIds = mutableSetOf<String>()
-    private var initializedNotificationBaseline = false
-    private var lastKnownUnreadMessages: Int? = null
-
     val themePreference: StateFlow<ThemePreference> = repository.sessionStore.themePreferenceFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ThemePreference.SYSTEM)
 
@@ -81,6 +77,8 @@ class SessionViewModel(
     private val _campuses = MutableStateFlow(KartGhanaCampuses)
     val campuses: StateFlow<List<String>> = _campuses.asStateFlow()
 
+    private val isAppInForeground = MutableStateFlow(true)
+    private var lastForegroundSyncAtMs: Long = 0L
     private var unreadPollingJob: Job? = null
     private var maintenancePollingJob: Job? = null
     private var lastMetadataRefreshUserId: String? = null
@@ -97,7 +95,9 @@ class SessionViewModel(
                     if (!recentlySynced) {
                         refreshUserMetadata(session.userId)
                     }
-                    startUnreadPolling(session.userId)
+                    if (isAppInForeground.value) {
+                        startUnreadPolling(session.userId)
+                    }
                     if (repository.sessionStore.isPushEnabled()) {
                         syncFcmToken(session.userId)
                     }
@@ -106,9 +106,7 @@ class SessionViewModel(
                     unreadPollingJob = null
                     lastMetadataRefreshUserId = null
                     lastMetadataRefreshAtMs = 0L
-                    seenNotificationIds.clear()
-                    initializedNotificationBaseline = false
-                    lastKnownUnreadMessages = null
+                    lastForegroundSyncAtMs = 0L
                     _uiState.update {
                         it.copy(
                             profile = null,
@@ -123,6 +121,14 @@ class SessionViewModel(
             }
         }
         viewModelScope.launch {
+            com.example.notifications.KartPushEventBus.events.collect {
+                val uid = _uiState.value.session.userId
+                if (uid.isNotBlank() && isAppInForeground.value) {
+                    refreshUnreadCounts(uid)
+                }
+            }
+        }
+        viewModelScope.launch {
             applyPlatformFlags(repository.fetchPlatformFlags())
         }
         viewModelScope.launch {
@@ -133,36 +139,65 @@ class SessionViewModel(
         }
     }
 
+    fun setAppInForeground(foreground: Boolean) {
+        if (isAppInForeground.value == foreground) return
+        isAppInForeground.value = foreground
+        if (!foreground) {
+            unreadPollingJob?.cancel()
+            unreadPollingJob = null
+            maintenancePollingJob?.cancel()
+            maintenancePollingJob = null
+        } else {
+            val uid = _uiState.value.session.userId
+            if (uid.isNotBlank()) {
+                startUnreadPolling(uid)
+                val now = System.currentTimeMillis()
+                if (now - lastForegroundSyncAtMs >= 30_000L) {
+                    refreshUnreadCounts(uid)
+                }
+            }
+            if (_uiState.value.isMaintenanceMode) {
+                startMaintenancePollingIfNeeded()
+            }
+        }
+    }
+
+    private fun startMaintenancePollingIfNeeded() {
+        if (!_uiState.value.isMaintenanceMode || !isAppInForeground.value) {
+            maintenancePollingJob?.cancel()
+            maintenancePollingJob = null
+            return
+        }
+        if (maintenancePollingJob?.isActive == true) return
+        maintenancePollingJob = viewModelScope.launch {
+            while (_uiState.value.isMaintenanceMode && isAppInForeground.value) {
+                delay(30_000L)
+                if (!isAppInForeground.value) break
+                val refreshed = repository.fetchPlatformFlags(forceRefresh = true)
+                _uiState.update {
+                    it.copy(
+                        isMaintenanceMode = refreshed.isMaintenanceMode,
+                        buyNowEnabled = refreshed.buyNowEnabled,
+                        promoDailyPrice = refreshed.promoDailyPrice,
+                        promoWeeklyPrice = refreshed.promoWeeklyPrice,
+                        promoFeaturedPrice = refreshed.promoFeaturedPrice
+                    )
+                }
+            }
+        }
+    }
+
     private fun applyPlatformFlags(flags: com.example.domain.model.PlatformFlags) {
         _uiState.update {
             it.copy(
                 isMaintenanceMode = flags.isMaintenanceMode,
                 buyNowEnabled = flags.buyNowEnabled,
-                promoBoostRate = flags.promoBoostRate,
-                promoFeaturedRate = flags.promoFeaturedRate,
-                promoCampusAdRate = flags.promoCampusAdRate
+                promoDailyPrice = flags.promoDailyPrice,
+                promoWeeklyPrice = flags.promoWeeklyPrice,
+                promoFeaturedPrice = flags.promoFeaturedPrice
             )
         }
-        if (flags.isMaintenanceMode && maintenancePollingJob?.isActive != true) {
-            maintenancePollingJob = viewModelScope.launch {
-                while (_uiState.value.isMaintenanceMode) {
-                    delay(30_000L)
-                    val refreshed = repository.fetchPlatformFlags()
-                    _uiState.update {
-                        it.copy(
-                            isMaintenanceMode = refreshed.isMaintenanceMode,
-                            buyNowEnabled = refreshed.buyNowEnabled,
-                            promoBoostRate = refreshed.promoBoostRate,
-                            promoFeaturedRate = refreshed.promoFeaturedRate,
-                            promoCampusAdRate = refreshed.promoCampusAdRate
-                        )
-                    }
-                }
-            }
-        } else if (!flags.isMaintenanceMode) {
-            maintenancePollingJob?.cancel()
-            maintenancePollingJob = null
-        }
+        startMaintenancePollingIfNeeded()
     }
 
     private fun syncFcmToken(userId: String) {
@@ -182,16 +217,18 @@ class SessionViewModel(
     }
 
     private fun startUnreadPolling(userId: String) {
+        if (!isAppInForeground.value || userId.isBlank()) return
         unreadPollingJob?.cancel()
         unreadPollingJob = viewModelScope.launch {
             var pollCycle = 0
-            while (true) {
-                delay(15_000L)
+            while (isAppInForeground.value) {
+                delay(60_000L)
+                if (!isAppInForeground.value) break
                 pollCycle += 1
                 refreshUnreadCounts(userId)
-                if (pollCycle % 2 == 0) {
+                if (pollCycle % 5 == 0) {
                     val freshProfile = repository.fetchMyProfile(userId)
-                    val flags = repository.fetchPlatformFlags()
+                    val flags = repository.fetchPlatformFlags(forceRefresh = true)
                     _uiState.update {
                         it.copy(
                             profile = freshProfile ?: it.profile,
@@ -206,49 +243,9 @@ class SessionViewModel(
 
     fun refreshUnreadCounts(userId: String = _uiState.value.session.userId) {
         if (userId.isBlank()) return
+        lastForegroundSyncAtMs = System.currentTimeMillis()
         viewModelScope.launch {
-            val unreadNotifs = repository.fetchUnreadNotificationsCount(userId)
-            val unreadMsgs = repository.fetchUnreadMessagesCount()
-
-            if (pushEnabled.value) {
-                val prevMsgs = lastKnownUnreadMessages
-                if (prevMsgs != null && unreadMsgs > prevMsgs) {
-                    val delta = unreadMsgs - prevMsgs
-                    _pushAlerts.tryEmit(
-                        PushAlert(
-                            id = 1001,
-                            title = "New message on Kart",
-                            body = if (delta == 1) "You have a new campus chat message." else "You have $delta new campus chat messages.",
-                            isMessage = true,
-                            deepLink = "/messages"
-                        )
-                    )
-                }
-
-                val notifRes = repository.fetchNotifications(userId)
-                if (notifRes is ApiResult.Success) {
-                    val unreadList = notifRes.data.filter { it.isRead != true }
-                    if (!initializedNotificationBaseline) {
-                        seenNotificationIds.addAll(unreadList.map { it.id })
-                        initializedNotificationBaseline = true
-                    } else {
-                        unreadList.filter { it.id !in seenNotificationIds }.forEach { notif ->
-                            seenNotificationIds.add(notif.id)
-                            _pushAlerts.tryEmit(
-                                PushAlert(
-                                    id = notif.id.hashCode(),
-                                    title = notif.title ?: "Kart Update",
-                                    body = notif.message ?: "You have a new update on Kart.",
-                                    isMessage = notif.type?.contains("message", ignoreCase = true) == true,
-                                    deepLink = notif.link ?: "/notifications"
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-            lastKnownUnreadMessages = unreadMsgs
-
+            val (unreadNotifs, unreadMsgs) = repository.fetchUnreadSummary(userId)
             _uiState.update {
                 it.copy(
                     unreadMessages = unreadMsgs,
@@ -260,13 +257,14 @@ class SessionViewModel(
 
     private suspend fun refreshUserMetadataSync(userId: String): Profile? {
         if (userId.isBlank()) return null
+        val now = System.currentTimeMillis()
         lastMetadataRefreshUserId = userId
-        lastMetadataRefreshAtMs = System.currentTimeMillis()
+        lastMetadataRefreshAtMs = now
+        lastForegroundSyncAtMs = now
         val profile = repository.fetchMyProfile(userId)
         val wishlistRes = repository.fetchWishlist(userId)
         val blockedRes = repository.fetchBlockedUsers()
-        val unreadNotifs = repository.fetchUnreadNotificationsCount(userId)
-        val unreadMsgs = repository.fetchUnreadMessagesCount()
+        val (unreadNotifs, unreadMsgs) = repository.fetchUnreadSummary(userId)
         val flags = repository.fetchPlatformFlags()
 
         val savedIds = (wishlistRes as? ApiResult.Success)?.data?.map { it.productId }?.toSet()

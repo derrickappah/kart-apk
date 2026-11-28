@@ -93,6 +93,7 @@ import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+import com.example.domain.model.KartErrorFormatter
 import com.example.ui.theme.KartDanger
 import com.example.ui.theme.KartPrimary
 import com.example.ui.theme.KartThemeTokens
@@ -379,9 +380,10 @@ fun KartInAppCameraDialog(
                 cameraError = null
             }.onFailure { err ->
                 isCameraReady = false
-                cameraError = err.localizedMessage
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "Unable to start camera stream. You can still upload from your gallery."
+                cameraError = KartErrorFormatter.fromThrowable(
+                    err,
+                    "Unable to start camera stream. You can still upload from your gallery."
+                )
             }
         }
 

@@ -24,6 +24,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.random.Random
 
 data class TypingEvent(
     val conversationId: String,
@@ -33,8 +34,9 @@ data class TypingEvent(
 
 /**
  * Lightweight OkHttp WebSocket client for Supabase Realtime (Phoenix v1 protocol).
- * Subscribes to INSERT events on `public.messages`, global user presence (`realtime:online_users`),
- * and per-conversation typing broadcast channels (`realtime:chat:<conversationId>`).
+ * Scoped strictly to the currently active conversation channel (`realtime:chat:<conversationId>`)
+ * using O(1) 2-party Presence and Broadcast (`typing`, `new_message`), avoiding O(N^2) global
+ * presence rooms and unfiltered `postgres_changes` RLS fan-out.
  */
 class SupabaseRealtimeClient(
     private val supabaseUrl: String = BuildConfig.SUPABASE_URL,
@@ -58,6 +60,9 @@ class SupabaseRealtimeClient(
     private val _typingEvents = MutableSharedFlow<TypingEvent>(extraBufferCapacity = 32)
     val typingEvents: SharedFlow<TypingEvent> = _typingEvents.asSharedFlow()
 
+    private val _isConnected = MutableStateFlow(false)
+    val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+
     @Volatile
     private var webSocket: WebSocket? = null
     private val connectionGen = AtomicInteger(0)
@@ -65,14 +70,18 @@ class SupabaseRealtimeClient(
     private var reconnectJob: Job? = null
     private var tokenProvider: (suspend () -> String)? = null
     private var reconnectAttempt = 0
+
     @Volatile
     private var currentUserId: String = ""
+
     @Volatile
     private var currentAccessToken: String = ""
+
     @Volatile
     private var activeConversationChannelId: String? = null
+
     @Volatile
-    private var presenceJoinRef: String? = null
+    private var activeChannelJoinRef: String? = null
 
     fun connect(
         accessToken: String,
@@ -89,7 +98,8 @@ class SupabaseRealtimeClient(
     private fun openSocket(accessToken: String) {
         if (supabaseAnonKey.isBlank() || accessToken.isBlank()) return
         currentAccessToken = accessToken
-        presenceJoinRef = null
+        activeChannelJoinRef = null
+        _isConnected.value = false
         heartbeatJob?.cancel()
         heartbeatJob = null
         reconnectJob?.cancel()
@@ -112,18 +122,20 @@ class SupabaseRealtimeClient(
                     return
                 }
                 reconnectAttempt = 0
+                _isConnected.value = true
                 Log.d(TAG, "WebSocket opened")
-                val joinPayload = buildJoinMessage(accessToken, refCounter.getAndIncrement())
-                webSocket.send(joinPayload)
-                val uid = currentUserId
-                if (uid.isNotBlank()) {
-                    val pRef = refCounter.getAndIncrement()
-                    presenceJoinRef = pRef.toString()
-                    webSocket.send(buildPresenceJoinMessage(accessToken, uid, pRef))
-                }
                 val convId = activeConversationChannelId
                 if (!convId.isNullOrBlank()) {
-                    webSocket.send(buildChatChannelJoinMessage(accessToken, convId, refCounter.getAndIncrement()))
+                    val joinRef = refCounter.getAndIncrement()
+                    activeChannelJoinRef = joinRef.toString()
+                    webSocket.send(
+                        buildChatChannelJoinMessage(
+                            accessToken = accessToken,
+                            conversationId = convId,
+                            userId = currentUserId,
+                            ref = joinRef
+                        )
+                    )
                 }
                 startHeartbeat(webSocket)
             }
@@ -131,15 +143,22 @@ class SupabaseRealtimeClient(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (connectionGen.get() != myGen) return
                 logFrameSummary(text)
-                if (isPresenceJoinOk(text, presenceJoinRef)) {
-                    presenceJoinRef = null
+                val convId = activeConversationChannelId
+                if (!convId.isNullOrBlank() && isChannelJoinOk(text, "realtime:chat:$convId", activeChannelJoinRef)) {
+                    activeChannelJoinRef = null
                     val uid = currentUserId
                     if (uid.isNotBlank()) {
-                        webSocket.send(buildPresenceTrackMessage(uid, refCounter.getAndIncrement()))
+                        webSocket.send(
+                            buildChatPresenceTrackMessage(
+                                conversationId = convId,
+                                userId = uid,
+                                ref = refCounter.getAndIncrement()
+                            )
+                        )
                     }
                 }
-                parseConversationIdFromEvent(text)?.let { convId ->
-                    _messageEvents.tryEmit(convId)
+                (parseNewMessageBroadcast(text) ?: parseConversationIdFromEvent(text))?.let { targetConvId ->
+                    _messageEvents.tryEmit(targetConvId)
                 }
                 parsePresenceState(text)?.let { online ->
                     _onlineUserIds.value = online
@@ -155,6 +174,7 @@ class SupabaseRealtimeClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (connectionGen.get() != myGen) return
                 Log.w(TAG, "WebSocket failure: ${t.message}")
+                _isConnected.value = false
                 heartbeatJob?.cancel()
                 scheduleReconnect(myGen)
             }
@@ -162,6 +182,7 @@ class SupabaseRealtimeClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (connectionGen.get() != myGen) return
                 Log.d(TAG, "WebSocket closed: code=$code reason=$reason")
+                _isConnected.value = false
                 heartbeatJob?.cancel()
                 if (code != 1000) scheduleReconnect(myGen)
             }
@@ -171,7 +192,7 @@ class SupabaseRealtimeClient(
     private fun scheduleReconnect(expectedGen: Int) {
         val provider = tokenProvider ?: return
         reconnectJob?.cancel()
-        val delayMs = computeBackoffDelayMs(reconnectAttempt++)
+        val delayMs = computeBackoffDelayMs(reconnectAttempt++) + Random.nextLong(0L, 1_001L)
         reconnectJob = scope.launch {
             delay(delayMs)
             if (connectionGen.get() != expectedGen) return@launch
@@ -190,10 +211,20 @@ class SupabaseRealtimeClient(
         if (!prev.isNullOrBlank() && ws != null) {
             ws.send(buildLeaveMessage("realtime:chat:$prev", refCounter.getAndIncrement()))
         }
+        _onlineUserIds.value = emptySet()
         activeConversationChannelId = conversationId
         val token = currentAccessToken
         if (ws != null && token.isNotBlank()) {
-            ws.send(buildChatChannelJoinMessage(token, conversationId, refCounter.getAndIncrement()))
+            val joinRef = refCounter.getAndIncrement()
+            activeChannelJoinRef = joinRef.toString()
+            ws.send(
+                buildChatChannelJoinMessage(
+                    accessToken = token,
+                    conversationId = conversationId,
+                    userId = currentUserId,
+                    ref = joinRef
+                )
+            )
         }
     }
 
@@ -201,6 +232,8 @@ class SupabaseRealtimeClient(
         if (conversationId.isBlank()) return
         if (activeConversationChannelId == conversationId) {
             activeConversationChannelId = null
+            activeChannelJoinRef = null
+            _onlineUserIds.value = emptySet()
             webSocket?.send(buildLeaveMessage("realtime:chat:$conversationId", refCounter.getAndIncrement()))
         }
     }
@@ -209,7 +242,19 @@ class SupabaseRealtimeClient(
         if (conversationId.isBlank() || userId.isBlank()) return
         val ws = webSocket ?: return
         ws.send(buildTypingBroadcastMessage(conversationId, userId, isTyping, refCounter.getAndIncrement()))
-        ws.send(buildGlobalTypingBroadcastMessage(conversationId, userId, isTyping, refCounter.getAndIncrement()))
+    }
+
+    fun sendNewMessageBroadcast(conversationId: String, messageId: String, senderId: String) {
+        if (conversationId.isBlank() || senderId.isBlank()) return
+        val ws = webSocket ?: return
+        ws.send(
+            buildNewMessageBroadcastMessage(
+                conversationId = conversationId,
+                messageId = messageId,
+                senderId = senderId,
+                ref = refCounter.getAndIncrement()
+            )
+        )
     }
 
     fun disconnect() {
@@ -218,7 +263,8 @@ class SupabaseRealtimeClient(
         currentUserId = ""
         currentAccessToken = ""
         activeConversationChannelId = null
-        presenceJoinRef = null
+        activeChannelJoinRef = null
+        _isConnected.value = false
         _onlineUserIds.value = emptySet()
         reconnectJob?.cancel()
         reconnectJob = null
@@ -265,25 +311,6 @@ class SupabaseRealtimeClient(
             return (2_000L shl cappedAttempt).coerceAtMost(30_000L)
         }
 
-        internal fun buildJoinMessage(accessToken: String, ref: Int): String {
-            val changeFilter = JSONObject()
-                .put("event", "INSERT")
-                .put("schema", "public")
-                .put("table", "messages")
-            val config = JSONObject()
-                .put("postgres_changes", JSONArray().put(changeFilter))
-            val payload = JSONObject()
-                .put("config", config)
-                .put("access_token", accessToken)
-            return JSONObject()
-                .put("topic", "realtime:public:messages")
-                .put("event", "phx_join")
-                .put("payload", payload)
-                .put("ref", ref.toString())
-                .put("join_ref", ref.toString())
-                .toString()
-        }
-
         internal fun parseConversationIdFromEvent(rawJson: String): String? {
             return runCatching {
                 val root = JSONObject(rawJson)
@@ -294,61 +321,32 @@ class SupabaseRealtimeClient(
             }.getOrNull()
         }
 
-        internal fun buildPresenceJoinMessage(accessToken: String, userId: String, ref: Int): String {
-            val broadcastConfig = JSONObject()
-                .put("ack", false)
-                .put("self", false)
-            val presenceConfig = JSONObject()
-                .put("key", userId)
-                .put("enabled", true)
-            val config = JSONObject()
-                .put("broadcast", broadcastConfig)
-                .put("presence", presenceConfig)
-                .put("private", false)
-            val payload = JSONObject()
-                .put("config", config)
-                .put("access_token", accessToken)
-            return JSONObject()
-                .put("topic", "realtime:online_users")
-                .put("event", "phx_join")
-                .put("payload", payload)
-                .put("ref", ref.toString())
-                .put("join_ref", ref.toString())
-                .toString()
-        }
-
-        internal fun buildPresenceTrackMessage(userId: String, ref: Int): String {
-            val innerPayload = JSONObject().put("user_id", userId)
-            val payload = JSONObject()
-                .put("type", "presence")
-                .put("event", "track")
-                .put("payload", innerPayload)
-            return JSONObject()
-                .put("topic", "realtime:online_users")
-                .put("event", "presence")
-                .put("payload", payload)
-                .put("ref", ref.toString())
-                .toString()
-        }
-
-        internal fun isPresenceJoinOk(rawJson: String, expectedRef: String?): Boolean {
+        internal fun isChannelJoinOk(rawJson: String, expectedTopic: String, expectedRef: String?): Boolean {
             if (expectedRef.isNullOrBlank()) return false
             return runCatching {
                 val root = JSONObject(rawJson)
-                root.optString("topic") == "realtime:online_users" &&
+                root.optString("topic") == expectedTopic &&
                     root.optString("event") == "phx_reply" &&
                     root.optString("ref") == expectedRef &&
                     root.optJSONObject("payload")?.optString("status") == "ok"
             }.getOrDefault(false)
         }
 
-        internal fun buildChatChannelJoinMessage(accessToken: String, conversationId: String, ref: Int): String {
+        internal fun buildChatChannelJoinMessage(
+            accessToken: String,
+            conversationId: String,
+            userId: String = "",
+            ref: Int
+        ): String {
             val broadcastConfig = JSONObject()
                 .put("ack", false)
                 .put("self", false)
+            val presenceConfig = JSONObject()
+                .put("key", userId)
+                .put("enabled", userId.isNotBlank())
             val config = JSONObject()
                 .put("broadcast", broadcastConfig)
-                .put("presence", JSONObject().put("key", ""))
+                .put("presence", presenceConfig)
                 .put("private", false)
             val payload = JSONObject()
                 .put("config", config)
@@ -359,6 +357,24 @@ class SupabaseRealtimeClient(
                 .put("payload", payload)
                 .put("ref", ref.toString())
                 .put("join_ref", ref.toString())
+                .toString()
+        }
+
+        internal fun buildChatPresenceTrackMessage(
+            conversationId: String,
+            userId: String,
+            ref: Int
+        ): String {
+            val innerPayload = JSONObject().put("user_id", userId)
+            val payload = JSONObject()
+                .put("type", "presence")
+                .put("event", "track")
+                .put("payload", innerPayload)
+            return JSONObject()
+                .put("topic", "realtime:chat:$conversationId")
+                .put("event", "presence")
+                .put("payload", payload)
+                .put("ref", ref.toString())
                 .toString()
         }
 
@@ -392,26 +408,39 @@ class SupabaseRealtimeClient(
                 .toString()
         }
 
-        internal fun buildGlobalTypingBroadcastMessage(
+        internal fun buildNewMessageBroadcastMessage(
             conversationId: String,
-            userId: String,
-            isTyping: Boolean,
+            messageId: String,
+            senderId: String,
             ref: Int
         ): String {
             val innerPayload = JSONObject()
                 .put("conversation_id", conversationId)
-                .put("user_id", userId)
-                .put("is_typing", isTyping)
+                .put("message_id", messageId)
+                .put("sender_id", senderId)
             val payload = JSONObject()
                 .put("type", "broadcast")
-                .put("event", "typing")
+                .put("event", "new_message")
                 .put("payload", innerPayload)
             return JSONObject()
-                .put("topic", "realtime:online_users")
+                .put("topic", "realtime:chat:$conversationId")
                 .put("event", "broadcast")
                 .put("payload", payload)
                 .put("ref", ref.toString())
                 .toString()
+        }
+
+        internal fun parseNewMessageBroadcast(rawJson: String): String? {
+            return runCatching {
+                val root = JSONObject(rawJson)
+                if (root.optString("event") != "broadcast") return null
+                val topic = root.optString("topic", "")
+                if (!topic.startsWith("realtime:chat:")) return null
+                val payload = root.optJSONObject("payload") ?: return null
+                if (payload.optString("event") != "new_message") return null
+                val convId = topic.removePrefix("realtime:chat:")
+                convId.takeIf { it.isNotBlank() }
+            }.getOrNull()
         }
 
         internal fun parsePresenceState(rawJson: String): Set<String>? {
@@ -450,14 +479,11 @@ class SupabaseRealtimeClient(
                 val root = JSONObject(rawJson)
                 if (root.optString("event") != "broadcast") return null
                 val topic = root.optString("topic", "")
+                if (!topic.startsWith("realtime:chat:")) return null
                 val payload = root.optJSONObject("payload") ?: return null
                 if (payload.optString("event") != "typing") return null
                 val data = payload.optJSONObject("payload") ?: return null
-                val conversationId = when {
-                    topic.startsWith("realtime:chat:") -> topic.removePrefix("realtime:chat:")
-                    topic == "realtime:online_users" -> data.optString("conversation_id", "")
-                    else -> ""
-                }
+                val conversationId = topic.removePrefix("realtime:chat:")
                 if (conversationId.isBlank()) return null
                 val userId = data.optString("user_id", "")
                 if (userId.isBlank()) return null
@@ -470,7 +496,8 @@ class SupabaseRealtimeClient(
 
 /**
  * Dedicated Supabase Realtime WebSocket client for the Admin Console.
- * Subscribes to postgres_changes on orders, profiles, products, and moderation queues.
+ * Subscribes only to low-volume moderation queues (verifications, withdrawals, refunds, reports)
+ * to avoid noisy full-console refreshes from high-write consumer tables.
  */
 class SupabaseAdminRealtimeClient(
     private val supabaseUrl: String = BuildConfig.SUPABASE_URL,
@@ -488,8 +515,8 @@ class SupabaseAdminRealtimeClient(
     private val _tableEvents = MutableSharedFlow<String>(extraBufferCapacity = 64)
     val tableEvents: SharedFlow<String> = _tableEvents.asSharedFlow()
 
-    private val _connected = kotlinx.coroutines.flow.MutableStateFlow(false)
-    val connected: kotlinx.coroutines.flow.StateFlow<Boolean> = _connected
+    private val _connected = MutableStateFlow(false)
+    val connected: StateFlow<Boolean> = _connected
 
     @Volatile
     private var webSocket: WebSocket? = null
@@ -562,7 +589,7 @@ class SupabaseAdminRealtimeClient(
     private fun scheduleReconnect(expectedGen: Int) {
         val provider = tokenProvider ?: return
         reconnectJob?.cancel()
-        val delayMs = SupabaseRealtimeClient.computeBackoffDelayMs(reconnectAttempt++)
+        val delayMs = SupabaseRealtimeClient.computeBackoffDelayMs(reconnectAttempt++) + Random.nextLong(0L, 1_001L)
         reconnectJob = scope.launch {
             delay(delayMs)
             if (connectionGen.get() != expectedGen) return@launch
@@ -601,10 +628,7 @@ class SupabaseAdminRealtimeClient(
     }
 
     companion object {
-        private val WATCHED_TABLES = listOf(
-            "orders",
-            "profiles",
-            "products",
+        internal val WATCHED_TABLES = listOf(
             "verification_requests",
             "withdrawal_requests",
             "refund_requests",

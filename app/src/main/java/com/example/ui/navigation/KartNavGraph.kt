@@ -3,13 +3,18 @@ package com.example.ui.navigation
 import android.net.Uri
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -18,6 +23,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -25,6 +31,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -37,9 +45,11 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.data.repository.KartRepository
 import com.example.domain.model.EmptyStateAsset
-import com.example.ui.components.KartBottomNav
+import com.example.ui.components.ConnectivityBannerState
+import com.example.ui.components.KartBottomChromeDock
 import com.example.ui.components.KartNavigationRail
 import com.example.ui.components.KartTopBar
+import com.example.ui.components.rememberConnectivityBannerState
 import com.example.ui.screens.AdminDashboardScreen
 import com.example.ui.screens.CategoriesScreen
 import com.example.ui.screens.ChatThreadScreen
@@ -116,6 +126,11 @@ fun KartAppRoot(
         onDispose { networkMonitor.stop() }
     }
     val isOnline by networkMonitor.isOnline.collectAsStateWithLifecycle()
+    val connectivityBannerState = rememberConnectivityBannerState(isOnline = isOnline)
+    val bannerVisibilityState = remember {
+        MutableTransitionState(connectivityBannerState != ConnectivityBannerState.HIDDEN)
+    }
+    bannerVisibilityState.targetState = connectivityBannerState != ConnectivityBannerState.HIDDEN
 
     var askedNotifPermThisSession by rememberSaveable { mutableStateOf(false) }
     val notifPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -126,12 +141,29 @@ fun KartAppRoot(
         }
     }
 
-    LaunchedEffect(sessionState.isLoggedIn, sessionState.session.userId) {
-        if (sessionState.isLoggedIn && sessionState.session.userId.isNotBlank()) {
-            messagesVm.startRealtime(sessionState.session.userId)
-        } else {
+    LaunchedEffect(sessionState.isLoggedIn) {
+        if (!sessionState.isLoggedIn) {
             messagesVm.stopRealtime()
         }
+    }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_START -> {
+                    sessionViewModel.setAppInForeground(true)
+                    messagesVm.setAppInForeground(true)
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    sessionViewModel.setAppInForeground(false)
+                    messagesVm.setAppInForeground(false)
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     LaunchedEffect(sessionState.isLoggedIn, pushEnabled) {
@@ -460,6 +492,8 @@ fun KartAppRoot(
         val isExpanded = maxWidth >= 600.dp
         val contentMaxWidth = if (isExpanded && showMainChrome) maxWidth - 80.dp else maxWidth
         val showBottomBar = !isExpanded && showMainChrome
+        val isBannerComposed = bannerVisibilityState.currentState || bannerVisibilityState.targetState
+        val bottomChromeHandlesNavBars = showBottomBar || isBannerComposed
 
         Row(modifier = Modifier.fillMaxSize()) {
             if (isExpanded && showMainChrome) {
@@ -470,13 +504,35 @@ fun KartAppRoot(
                 )
             }
 
-            Box(
+            Column(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.background)
             ) {
-                NavHost(
+                var bottomChromeHeightPx by remember { mutableIntStateOf(0) }
+                val density = LocalDensity.current
+                val navBarBottomPx = WindowInsets.navigationBars.getBottom(density)
+                val extraBottomConsumedDp = with(density) {
+                    (bottomChromeHeightPx - navBarBottomPx).coerceAtLeast(0).toDp()
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.background)
+                        .then(
+                            if (bottomChromeHandlesNavBars) {
+                                Modifier
+                                    .consumeWindowInsets(WindowInsets.navigationBars)
+                                    .consumeWindowInsets(PaddingValues(bottom = extraBottomConsumedDp))
+                            } else {
+                                Modifier
+                            }
+                        )
+                ) {
+                    NavHost(
                     navController = navController,
                     startDestination = "home",
                     enterTransition = { EnterTransition.None },
@@ -494,7 +550,6 @@ fun KartAppRoot(
                             viewModel = homeVm,
                             wishlistIds = sessionState.wishlistIds,
                             contentMaxWidth = contentMaxWidth,
-                            showBottomBar = showBottomBar,
                             topBar = { fillProgress ->
                                 KartTopBar(
                                     isTransparent = fillProgress < 0.5f,
@@ -526,7 +581,6 @@ fun KartAppRoot(
                     ) { backStack ->
                         val cat = backStack.arguments?.getString("category").orEmpty()
                         KartTabScreenFrame(
-                            showBottomBar = showBottomBar,
                             topBar = {
                                 KartTopBar(
                                     isTransparent = false,
@@ -709,7 +763,6 @@ fun KartAppRoot(
                             // --- Messages ---
                             composable("messages") {
                                 KartTabScreenFrame(
-                                    showBottomBar = showBottomBar,
                                     topBar = {
                                         KartTopBar(
                                             isTransparent = false,
@@ -868,9 +921,9 @@ fun KartAppRoot(
                                 PromoteListingScreen(
                                     productId = pid,
                                     viewModel = sellerVm,
-                                    boostRate = sessionState.promoBoostRate,
-                                    featuredRate = sessionState.promoFeaturedRate,
-                                    campusAdRate = sessionState.promoCampusAdRate,
+                                    dailyPrice = sessionState.promoDailyPrice,
+                                    weeklyPrice = sessionState.promoWeeklyPrice,
+                                    featuredPrice = sessionState.promoFeaturedPrice,
                                     onBack = { navController.popBackStack() },
                                     onShowMessage = sessionViewModel::showMessage
                                 )
@@ -896,7 +949,6 @@ fun KartAppRoot(
                             // --- Profile, Wishlist & Notifications ---
                             composable("profile") {
                                 KartTabScreenFrame(
-                                    showBottomBar = showBottomBar,
                                     topBar = {
                                         KartTopBar(
                                             isTransparent = false,
@@ -1095,6 +1147,7 @@ fun KartAppRoot(
                                     currentUserId = sessionState.session.userId,
                                     viewModel = adminVm,
                                     onBuyNowSettingChanged = sessionViewModel::applyBuyNowEnabled,
+                                    onPlatformSettingsChanged = sessionViewModel::refreshPlatformFlags,
                                     onOpenProduct = { productId -> navController.navigate("product/$productId") },
                                     onOpenSeller = { sellerId -> navController.navigate("public_profile/$sellerId") },
                                     onOpenOrder = { orderId -> navController.navigate("order_detail/$orderId") },
@@ -1109,45 +1162,28 @@ fun KartAppRoot(
                             }
                         }
 
-                        if (showBottomBar) {
-                            KartBottomNav(
-                                currentRoute = baseRoute,
-                                unreadMessages = sessionState.unreadMessages,
-                                onTabSelected = ::navigateTopTab,
-                                modifier = Modifier.align(Alignment.BottomCenter)
-                            )
-                        }
-
-                        androidx.compose.animation.AnimatedVisibility(
-                            visible = !isOnline,
-                            modifier = Modifier.align(Alignment.TopCenter)
-                        ) {
-                            androidx.compose.material3.Surface(
-                                color = MaterialTheme.colorScheme.errorContainer,
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                                shadowElevation = 4.dp,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                androidx.compose.material3.Text(
-                                    text = "You're offline. Check your connection.",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    modifier = Modifier
-                                        .padding(horizontal = 16.dp, vertical = 10.dp)
-                                )
-                            }
-                        }
-
                         SnackbarHost(
                             hostState = snackbarHostState,
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .navigationBarsPadding()
-                                .padding(bottom = if (showBottomBar) 68.dp else 12.dp)
+                                .padding(bottom = 12.dp)
                         )
                     }
-                }
+
+                KartBottomChromeDock(
+                    showBottomBar = showBottomBar,
+                    currentRoute = baseRoute,
+                    unreadMessages = sessionState.unreadMessages,
+                    onTabSelected = ::navigateTopTab,
+                    bannerState = connectivityBannerState,
+                    bannerVisibilityState = bannerVisibilityState,
+                    modifier = Modifier.onSizeChanged { bottomChromeHeightPx = it.height }
+                )
             }
         }
+    }
+}
 
 internal data class PaymentCallbackParams(
     val orderId: String?,
@@ -1214,7 +1250,6 @@ internal fun normalizeDeepLinkPath(uri: Uri): String {
 
 @Composable
 private fun KartTabScreenFrame(
-    showBottomBar: Boolean,
     topBar: @Composable () -> Unit,
     content: @Composable () -> Unit
 ) {
@@ -1222,10 +1257,7 @@ private fun KartTabScreenFrame(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .then(
-                if (showBottomBar) Modifier.navigationBarsPadding().padding(bottom = 63.dp)
-                else Modifier.navigationBarsPadding()
-            )
+            .navigationBarsPadding()
     ) {
         topBar()
         Box(

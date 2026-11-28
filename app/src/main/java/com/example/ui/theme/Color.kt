@@ -41,6 +41,9 @@ val KartWarning = Color(0xFFF59E0B)
 val KartWarningContainer = Color(0xFFFEF3C7)
 val KartInfoContainer = Color(0xFFE0F2FE)
 val KartConditionOverlay = Color(0x99000000)
+val KartConnectivityOfflineLight = KartCharcoal
+val KartConnectivityOfflineDark = Color(0xFF16181D)
+val KartConnectivityOnline = Color(0xFF047857)
 
 // Hero Editorial & Promoted Banner Accents
 val KartHeroNavyDeep = Color(0xFF0C1821)

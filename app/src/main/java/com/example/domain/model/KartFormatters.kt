@@ -1,5 +1,6 @@
 package com.example.domain.model
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -343,20 +344,57 @@ object KartFormatters {
         return sb.toString()
     }
 
-    fun isTrustedMediaUrl(rawUrl: String): Boolean {
-        val url = rawUrl.trim()
-        if (!url.startsWith("https://", ignoreCase = true)) return false
+    enum class ImageVariant(val width: Int, val format: String, val quality: Int) {
+        CARD(width = 480, format = "webp", quality = 75),
+        DETAIL(width = 1200, format = "webp", quality = 82),
+        AVATAR(width = 256, format = "webp", quality = 78)
+    }
+
+    @JvmStatic
+    fun isTrustedMediaUrl(rawUrl: String?): Boolean {
+        val url = rawUrl?.trim().orEmpty()
+        if (url.isEmpty() || !url.startsWith("https://", ignoreCase = true)) return false
         val host = runCatching { java.net.URI(url).host?.lowercase(Locale.US) }.getOrNull() ?: return false
         val configuredSupabaseHost = runCatching {
             java.net.URI(com.example.BuildConfig.SUPABASE_URL).host?.lowercase(Locale.US)
         }.getOrNull()
         return host == "kart.cx" ||
             host == "www.kart.cx" ||
+            host == "cdn.kart.cx" ||
             host.endsWith(".kart.cx") ||
             (configuredSupabaseHost != null && host == configuredSupabaseHost) ||
             host.endsWith(".supabase.co") ||
             host.endsWith(".supabase.in") ||
-            host == "res.cloudinary.com"
+            host.endsWith(".r2.dev") ||
+            host.endsWith(".r2.cloudflarestorage.com") ||
+            host == "res.cloudinary.com" ||
+            host == "lh3.googleusercontent.com" ||
+            host == "api.dicebear.com" ||
+            host == "images.unsplash.com"
+    }
+
+    /**
+     * Appends Cloudflare Image Resizing query params when serving from cdn.kart.cx,
+     * minimizing mobile data usage on feed cards while keeping crisp 1200px zoom on detail views.
+     */
+    @JvmStatic
+    fun buildOptimizedImageUrl(rawUrl: String?, variant: ImageVariant = ImageVariant.CARD): String {
+        if (rawUrl.isNullOrBlank()) return ""
+        val trimmed = rawUrl.trim()
+        val parsed = trimmed.toHttpUrlOrNull() ?: return trimmed
+        if (!parsed.isHttps || !parsed.host.equals("cdn.kart.cx", ignoreCase = true)) {
+            return trimmed
+        }
+
+        return parsed.newBuilder()
+            .removeAllQueryParameters("width")
+            .removeAllQueryParameters("format")
+            .removeAllQueryParameters("quality")
+            .addQueryParameter("width", variant.width.toString())
+            .addQueryParameter("format", variant.format)
+            .addQueryParameter("quality", variant.quality.toString())
+            .build()
+            .toString()
     }
 
     fun sanitizeSocialUrl(raw: String?, platform: String): String? {

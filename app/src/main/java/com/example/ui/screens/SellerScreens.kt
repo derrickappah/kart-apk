@@ -1180,27 +1180,34 @@ fun MyListingsScreen(
     }
 }
 
+private data class PromoTierOption(
+    val tierId: String,
+    val title: String,
+    val subtitle: String,
+    val price: Double
+)
+
 @Composable
 fun PromoteListingScreen(
     productId: String,
     viewModel: SellerViewModel,
-    boostRate: Double = 15.0,
-    featuredRate: Double = 35.0,
-    campusAdRate: Double = 65.0,
+    dailyPrice: Double = 5.0,
+    weeklyPrice: Double = 25.0,
+    featuredPrice: Double = 50.0,
     onBack: () -> Unit,
     onShowMessage: (String) -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var adType by remember { mutableStateOf("Featured") }
-    var days by remember { mutableIntStateOf(7) }
-    val tiers = remember(boostRate, featuredRate, campusAdRate) {
+    var selectedTierId by remember { mutableStateOf("weekly") }
+    val tiers = remember(dailyPrice, weeklyPrice, featuredPrice) {
         listOf(
-            Triple("Boost", "Higher ranking in Marketplace search", boostRate.coerceAtLeast(1.0)),
-            Triple("Featured", "Featured Slider + Home Spotlight", featuredRate.coerceAtLeast(1.0)),
-            Triple("Campus Ad", "Top Hero Banner across your campus", campusAdRate.coerceAtLeast(1.0))
+            PromoTierOption("daily", "Daily Boost (24h)", "Higher ranking in Marketplace for 24 hours", dailyPrice.coerceAtLeast(0.0)),
+            PromoTierOption("weekly", "Weekly Boost (7d)", "7-day Marketplace ranking boost", weeklyPrice.coerceAtLeast(0.0)),
+            PromoTierOption("featured", "Featured Listing (30d)", "Featured Slider + Home Spotlight placement", featuredPrice.coerceAtLeast(0.0))
         )
     }
+    val chosenTier = tiers.firstOrNull { it.tierId == selectedTierId } ?: tiers[1]
 
     LaunchedEffect(state.feedback) {
         state.feedback?.let { onShowMessage(it); viewModel.clearFeedback() }
@@ -1217,10 +1224,10 @@ fun PromoteListingScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item {
-                Text("Choose Campaign Type", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Choose Campaign Plan", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
-            items(tiers) { (name, desc, baseCost) ->
-                val selected = adType == name
+            items(tiers) { tier ->
+                val selected = selectedTierId == tier.tierId
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = if (selected) KartPrimary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant
@@ -1229,7 +1236,7 @@ fun PromoteListingScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .border(if (selected) 2.dp else 1.dp, if (selected) KartPrimary else KartThemeTokens.colors.cardBorder, RoundedCornerShape(16.dp))
-                        .clickable { adType = name }
+                        .clickable { selectedTierId = tier.tierId }
                 ) {
                     Row(
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1237,34 +1244,35 @@ fun PromoteListingScreen(
                         modifier = Modifier.padding(16.dp)
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text(desc, style = MaterialTheme.typography.bodySmall, color = KartThemeTokens.colors.textSecondary)
+                            Text(tier.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text(tier.subtitle, style = MaterialTheme.typography.bodySmall, color = KartThemeTokens.colors.textSecondary)
                         }
-                        Text(KartFormatters.formatCedis(baseCost * (days / 7.0)), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, color = KartPrimary)
+                        Text(
+                            text = if (tier.price <= 0.0) "Free" else KartFormatters.formatCedis(tier.price),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Black,
+                            color = KartPrimary
+                        )
                     }
                 }
             }
             item {
-                Text("Duration", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(3, 7, 14, 30).forEach { d ->
-                        KartChip(label = "$d days", selected = days == d, onClick = { days = d })
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Estimated rate — exact campaign total is confirmed by the server at Paystack checkout.",
+                    text = if (chosenTier.price <= 0.0) {
+                        "This promotional tier is currently free and activates immediately."
+                    } else {
+                        "Total: ${KartFormatters.formatCedis(chosenTier.price)} — confirmed securely at Paystack checkout."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = KartThemeTokens.colors.textSecondary
                 )
             }
             item {
                 KartPrimaryButton(
-                    text = "Launch Promotion",
+                    text = if (chosenTier.price <= 0.0) "Activate Free Promotion" else "Launch Promotion",
                     loading = state.actionLoading,
                     onClick = {
-                        viewModel.promoteListing(productId, adType, days) { url ->
+                        viewModel.promoteListing(productId, chosenTier.tierId, chosenTier.price) { url ->
                             if (url.isNotBlank()) {
                                 runCatching {
                                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))

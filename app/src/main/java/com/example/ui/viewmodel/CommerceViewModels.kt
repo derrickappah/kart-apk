@@ -8,12 +8,14 @@ import com.example.data.repository.ApiResult
 import com.example.data.repository.KartRepository
 import com.example.data.repository.SellerHubBundle
 import com.example.domain.model.EnrichedConversation
+import com.example.domain.model.KartErrorFormatter
 import com.example.domain.model.MessageRow
 import com.example.domain.model.Order
 import com.example.domain.model.Product
 import com.example.domain.model.SubscriptionPlan
 import com.example.domain.model.UserSubscription
 import com.example.domain.model.Wallet
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class OrdersUiState(
     val loading: Boolean = true,
@@ -281,14 +284,75 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
     private val messagesCache = mutableMapOf<String, List<MessageRow>>()
     private var loadThreadJob: Job? = null
     private val realtimeClient = com.example.data.remote.SupabaseRealtimeClient()
+    val isRealtimeConnected: StateFlow<Boolean> = realtimeClient.isConnected
     private var realtimeEventsJob: Job? = null
     private var presenceJob: Job? = null
     private var typingEventsJob: Job? = null
     private var typingStopDebounceJob: Job? = null
+    private var stopRealtimeGraceJob: Job? = null
     private val remoteTypingExpiryJobs = mutableMapOf<Pair<String, String>, Job>()
     private var lastTypingSentAtMs = 0L
     private var isLocallyTyping = false
     private var realtimeConnectedUserId: String? = null
+    private var activeRealtimeConsumers = 0
+    private var realtimeUserId: String? = null
+    private var isAppInForeground = true
+    private var joinedConversationId: String? = null
+
+    init {
+        viewModelScope.launch {
+            com.example.notifications.KartPushEventBus.events.collect { eventType ->
+                if (eventType == "message" && activeRealtimeConsumers > 0 && isAppInForeground) {
+                    activeThreadId?.let { loadThread(it, silent = true) }
+                    (cachedUserId ?: realtimeUserId)?.takeIf { it.isNotBlank() }?.let { uid ->
+                        loadConversations(uid)
+                    }
+                }
+            }
+        }
+    }
+
+    fun acquireRealtime(userId: String) {
+        if (userId.isBlank()) return
+        stopRealtimeGraceJob?.cancel()
+        stopRealtimeGraceJob = null
+        activeRealtimeConsumers += 1
+        realtimeUserId = userId
+        if (isAppInForeground) {
+            startRealtime(userId)
+        }
+    }
+
+    fun releaseRealtime() {
+        activeRealtimeConsumers = (activeRealtimeConsumers - 1).coerceAtLeast(0)
+        if (activeRealtimeConsumers == 0) {
+            stopRealtimeGraceJob?.cancel()
+            stopRealtimeGraceJob = viewModelScope.launch {
+                delay(3_000L)
+                if (activeRealtimeConsumers == 0 || !isAppInForeground) {
+                    stopRealtimeInternal(clearJoinedChannel = false)
+                }
+            }
+        }
+    }
+
+    fun setAppInForeground(foreground: Boolean) {
+        if (isAppInForeground == foreground) return
+        isAppInForeground = foreground
+        if (foreground) {
+            stopRealtimeGraceJob?.cancel()
+            stopRealtimeGraceJob = null
+            val uid = realtimeUserId
+            if (activeRealtimeConsumers > 0 && !uid.isNullOrBlank()) {
+                startRealtime(uid)
+                activeThreadId?.let { loadThread(it, silent = true) }
+            }
+        } else {
+            stopRealtimeGraceJob?.cancel()
+            stopRealtimeGraceJob = null
+            stopRealtimeInternal(clearJoinedChannel = false)
+        }
+    }
 
     fun startRealtime(userId: String) {
         if (userId.isBlank() || realtimeConnectedUserId == userId) return
@@ -304,6 +368,9 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
             }
             realtimeClient.connect(token, userId = userId) {
                 repository.sessionStore.currentSession().accessToken
+            }
+            joinedConversationId?.takeIf { it.isNotBlank() }?.let { cid ->
+                realtimeClient.joinConversationChannel(cid)
             }
             presenceJob = launch {
                 realtimeClient.onlineUserIds.collect { ids ->
@@ -360,11 +427,15 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
     }
 
     fun enterConversation(conversationId: String) {
+        joinedConversationId = conversationId.takeIf { it.isNotBlank() }
         realtimeClient.joinConversationChannel(conversationId)
     }
 
     fun leaveConversation(conversationId: String, currentUserId: String) {
         stopTyping(conversationId, currentUserId)
+        if (joinedConversationId == conversationId) {
+            joinedConversationId = null
+        }
         realtimeClient.leaveConversationChannel(conversationId)
     }
 
@@ -399,8 +470,11 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
-    fun stopRealtime() {
+    private fun stopRealtimeInternal(clearJoinedChannel: Boolean) {
         realtimeConnectedUserId = null
+        if (clearJoinedChannel) {
+            joinedConversationId = null
+        }
         realtimeEventsJob?.cancel()
         realtimeEventsJob = null
         presenceJob?.cancel()
@@ -420,6 +494,14 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                 typingUsersByConversation = emptyMap()
             )
         }
+    }
+
+    fun stopRealtime() {
+        activeRealtimeConsumers = 0
+        realtimeUserId = null
+        stopRealtimeGraceJob?.cancel()
+        stopRealtimeGraceJob = null
+        stopRealtimeInternal(clearJoinedChannel = true)
     }
 
     override fun onCleared() {
@@ -446,13 +528,26 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
             _uiState.update { it.copy(loading = true, error = null) }
         }
         viewModelScope.launch {
+            var hasAnyCache = hasCachedConversations
+            if (!hasAnyCache) {
+                val diskCached = withContext(Dispatchers.IO) {
+                    repository.chatCacheStore?.loadConversations(userId).orEmpty()
+                }
+                if (diskCached.isNotEmpty()) {
+                    hasAnyCache = true
+                    _uiState.update { it.copy(loading = false, conversations = diskCached, error = null) }
+                }
+            }
             when (val res = repository.fetchConversations(userId)) {
                 is ApiResult.Success -> {
                     val sorted = res.data.sortedByDescending { it.lastMessage?.createdAt ?: it.updatedAt.orEmpty() }
                     _uiState.update { it.copy(loading = false, conversations = sorted, error = null) }
+                    withContext(Dispatchers.IO) {
+                        repository.chatCacheStore?.saveConversations(userId, sorted)
+                    }
                 }
                 is ApiResult.Error -> _uiState.update {
-                    it.copy(loading = false, error = if (hasCachedConversations) null else res.message)
+                    it.copy(loading = false, error = if (hasAnyCache) null else res.message)
                 }
             }
         }
@@ -501,11 +596,34 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
 
         loadThreadJob?.cancel()
         loadThreadJob = viewModelScope.launch {
-            when (val res = repository.fetchMessagesForConversation(conversationId, afterCreatedAt = lastServerCreatedAt)) {
+            val uid = cachedUserId ?: repository.sessionStore.currentSession().userId
+            var hasAnyCache = hasCache
+            var effectiveAfterCreatedAt = lastServerCreatedAt
+            if (!hasAnyCache && uid.isNotBlank()) {
+                val diskCached = withContext(Dispatchers.IO) {
+                    repository.chatCacheStore?.loadMessages(uid, conversationId).orEmpty()
+                }
+                if (diskCached.isNotEmpty()) {
+                    messagesCache[conversationId] = diskCached
+                    hasAnyCache = true
+                    effectiveAfterCreatedAt = diskCached
+                        .lastOrNull { it.id?.startsWith("local_") != true && !it.createdAt.isNullOrBlank() }
+                        ?.createdAt
+                    if (activeThreadId == conversationId) {
+                        _uiState.update { state ->
+                            val pendingLocal = state.activeMessages.filter { it.id?.startsWith("local_") == true }
+                            val merged = if (pendingLocal.isEmpty()) diskCached else diskCached + pendingLocal
+                            state.copy(loading = false, activeMessages = merged, error = null)
+                        }
+                    }
+                }
+            }
+
+            when (val res = repository.fetchMessagesForConversation(conversationId, afterCreatedAt = effectiveAfterCreatedAt)) {
                 is ApiResult.Success -> {
                     val incoming = res.data
                     val base = messagesCache[conversationId].orEmpty()
-                    val combinedServer = if (lastServerCreatedAt != null && base.isNotEmpty()) {
+                    val combinedServer = if (effectiveAfterCreatedAt != null && base.isNotEmpty()) {
                         val existingIds = base.mapNotNull { it.id }.toHashSet()
                         val fresh = incoming.filter { it.id == null || it.id !in existingIds }
                         if (fresh.isEmpty()) base else base + fresh
@@ -515,6 +633,11 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                     messagesCache[conversationId] = combinedServer
                     if (incoming.isNotEmpty()) {
                         combinedServer.lastOrNull()?.let { bumpConversationToTop(conversationId, it) }
+                    }
+                    if (uid.isNotBlank() && (incoming.isNotEmpty() || !hasAnyCache)) {
+                        withContext(Dispatchers.IO) {
+                            repository.chatCacheStore?.saveMessages(uid, conversationId, combinedServer)
+                        }
                     }
 
                     if (activeThreadId == conversationId) {
@@ -526,7 +649,7 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                     }
                 }
                 is ApiResult.Error -> {
-                    if (!silent && !hasCache && activeThreadId == conversationId) {
+                    if (!silent && !hasAnyCache && activeThreadId == conversationId) {
                         _uiState.update { it.copy(loading = false, error = res.message) }
                     }
                 }
@@ -638,9 +761,23 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                 when (val res = repository.sendMessage(conversationId, senderId, trimmed, allowMediaMarker = allowMediaMarker)) {
                     is ApiResult.Success -> {
                         val serverMsg = res.data
+                        realtimeClient.sendNewMessageBroadcast(
+                            conversationId = conversationId,
+                            messageId = serverMsg.id.orEmpty(),
+                            senderId = senderId
+                        )
                         val cached = messagesCache[conversationId].orEmpty()
-                        if (cached.none { it.id == serverMsg.id }) {
-                            messagesCache[conversationId] = cached + serverMsg
+                        val updatedServerCache = if (cached.none { it.id == serverMsg.id }) {
+                            cached + serverMsg
+                        } else {
+                            cached
+                        }
+                        messagesCache[conversationId] = updatedServerCache
+                        val uid = cachedUserId ?: repository.sessionStore.currentSession().userId
+                        if (uid.isNotBlank()) {
+                            withContext(Dispatchers.IO) {
+                                repository.chatCacheStore?.saveMessages(uid, conversationId, updatedServerCache)
+                            }
                         }
                         _uiState.update { state ->
                             if (activeThreadId != conversationId) {
@@ -680,7 +817,7 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                     state.copy(
                         sending = false,
                         activeMessages = updatedMessages,
-                        feedback = e.localizedMessage ?: "Failed to send message."
+                        feedback = KartErrorFormatter.fromThrowable(e, "Failed to send message.")
                     )
                 }
                 onFailure()
@@ -692,7 +829,13 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(sending = true) }
             try {
-                when (val upload = repository.uploadImageUri(resolver, uri, bucket = "chat-media", isPrivate = true)) {
+                when (val upload = repository.uploadImageUri(
+                    contentResolver = resolver,
+                    uri = uri,
+                    bucket = "chat-media",
+                    isPrivate = true,
+                    conversationId = conversationId
+                )) {
                     is ApiResult.Success -> {
                         val url = upload.data.trim()
                         if (url.isBlank()) {
@@ -704,7 +847,12 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                     is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(sending = false, feedback = e.localizedMessage ?: "Image upload failed.") }
+                _uiState.update {
+                    it.copy(
+                        sending = false,
+                        feedback = KartErrorFormatter.fromThrowable(e, "Image upload failed.")
+                    )
+                }
             }
         }
     }
@@ -713,7 +861,12 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(sending = true) }
             try {
-                when (val upload = repository.uploadAudioFile(audioFile, bucket = "chat-media", isPrivate = true)) {
+                when (val upload = repository.uploadAudioFile(
+                    file = audioFile,
+                    bucket = "chat-media",
+                    isPrivate = true,
+                    conversationId = conversationId
+                )) {
                     is ApiResult.Success -> {
                         val url = upload.data.trim()
                         if (url.isBlank()) {
@@ -731,7 +884,12 @@ class MessagesViewModel(private val repository: KartRepository) : ViewModel() {
                     is ApiResult.Error -> _uiState.update { it.copy(sending = false, feedback = upload.message) }
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(sending = false, feedback = e.localizedMessage ?: "Voice upload failed.") }
+                _uiState.update {
+                    it.copy(
+                        sending = false,
+                        feedback = KartErrorFormatter.fromThrowable(e, "Voice upload failed.")
+                    )
+                }
             } finally {
                 runCatching { audioFile.delete() }
             }
@@ -966,10 +1124,10 @@ class SellerViewModel(private val repository: KartRepository) : ViewModel() {
         }
     }
 
-    fun promoteListing(productId: String, adType: String, days: Int, onUrlOrDone: (String) -> Unit) {
+    fun promoteListing(productId: String, tierId: String, amount: Double, onUrlOrDone: (String) -> Unit) {
         viewModelScope.launch {
             _uiState.update { it.copy(actionLoading = true) }
-            when (val res = repository.createPromotion(productId, adType, days)) {
+            when (val res = repository.createPromotion(productId, tierId, amount)) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(actionLoading = false) }
                     onUrlOrDone(res.data)

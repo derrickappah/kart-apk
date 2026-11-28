@@ -107,25 +107,76 @@ data class AdminOverviewStats(
     val openProductReports: Int,
     val openUserReports: Int,
     val totalReviews: Int,
-    val activeAds: Int
+    val activeAds: Int,
+    val totalListings: Int = activeListings + suspendedListings,
+    val soldListings: Int = 0,
+    val adminUsers: Int = 0,
+    val standardUsers: Int = (totalUsers - verifiedUsers - bannedUsers).coerceAtLeast(0),
+    val pendingDeletions: Int = 0
 )
 
 object AdminConsoleHelpers {
+    internal fun shouldAttachSupabaseAuthHeaders(
+        resolvedUrl: String,
+        supabaseBaseUrl: String = BuildConfig.SUPABASE_URL
+    ): Boolean {
+        val normalizedUrl = resolvedUrl.trim().lowercase()
+        if (!normalizedUrl.startsWith("https://") && !normalizedUrl.startsWith("http://")) return false
+        val base = supabaseBaseUrl.trim().trimEnd('/').lowercase()
+        if (base.isBlank() || !normalizedUrl.startsWith(base)) return false
+        if (!normalizedUrl.contains("/storage/v1/object/authenticated/")) return false
+        if (normalizedUrl.contains("x-amz-signature=") || normalizedUrl.contains("token=")) return false
+        return true
+    }
+
     fun computeOverviewStats(bundle: AdminDashboardBundle?): AdminOverviewStats {
         if (bundle == null) {
-            return AdminOverviewStats(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0)
+            return AdminOverviewStats(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        }
+        bundle.serverStats?.let { s ->
+            val resolvedTotalListings = s.totalListings ?: maxOf(bundle.products.size, s.activeListings + s.suspendedListings)
+            val resolvedSoldListings = s.soldListings ?: (resolvedTotalListings - s.activeListings - s.suspendedListings).coerceAtLeast(0)
+            val resolvedStandardUsers = s.standardUsers ?: (s.totalUsers - s.verifiedUsers - s.bannedUsers).coerceAtLeast(0)
+            val resolvedAdminUsers = s.adminUsers ?: bundle.users.count { it.isAdmin == true }
+            val resolvedPendingDeletions = s.pendingDeletions ?: bundle.deletionRequests.count { isPendingStatus(it.status) }
+            return AdminOverviewStats(
+                totalUsers = s.totalUsers,
+                bannedUsers = s.bannedUsers,
+                verifiedUsers = s.verifiedUsers,
+                activeListings = s.activeListings,
+                suspendedListings = s.suspendedListings,
+                totalOrders = s.totalOrders,
+                totalGmv = s.totalGmv,
+                totalPlatformFees = s.totalPlatformFees,
+                pendingKyc = s.pendingKyc,
+                pendingWithdrawals = s.pendingWithdrawals,
+                pendingRefunds = s.pendingRefunds,
+                openReports = s.openReports,
+                openProductReports = s.openProductReports,
+                openUserReports = s.openUserReports,
+                totalReviews = s.totalReviews,
+                activeAds = s.activeAds,
+                totalListings = resolvedTotalListings,
+                soldListings = resolvedSoldListings,
+                adminUsers = resolvedAdminUsers,
+                standardUsers = resolvedStandardUsers,
+                pendingDeletions = resolvedPendingDeletions
+            )
         }
         val openReportRows = bundle.reports.filter {
             it.status.isNullOrBlank() || it.status.equals("Pending", true) || it.status.equals("Open", true)
         }
+        val suspendedListings = bundle.products.count {
+            it.status.equals("Banned", true) || it.status.equals("Suspended", true)
+        }
+        val activeListings = bundle.products.count { it.isActiveListing }
+        val soldListings = bundle.products.count { it.status.equals("Sold", true) || it.isOutOfStock }
         return AdminOverviewStats(
             totalUsers = bundle.users.size,
             bannedUsers = bundle.users.count { it.banned == true },
             verifiedUsers = bundle.users.count { it.isVerified == true },
-            activeListings = bundle.products.count { it.isActiveListing },
-            suspendedListings = bundle.products.count {
-                it.status.equals("Banned", true) || it.status.equals("Suspended", true)
-            },
+            activeListings = activeListings,
+            suspendedListings = suspendedListings,
             totalOrders = bundle.orders.size,
             totalGmv = bundle.orders.sumOf { it.totalAmount ?: 0.0 },
             totalPlatformFees = bundle.orders.sumOf { it.platformFeeTotal ?: 0.0 },
@@ -138,7 +189,12 @@ object AdminConsoleHelpers {
             totalReviews = bundle.reviews.size,
             activeAds = bundle.advertisements.count {
                 it.status.isNullOrBlank() || it.status.equals("Active", true)
-            }
+            },
+            totalListings = bundle.products.size,
+            soldListings = soldListings,
+            adminUsers = bundle.users.count { it.isAdmin == true },
+            standardUsers = bundle.users.count { it.isVerified != true && it.banned != true },
+            pendingDeletions = bundle.deletionRequests.count { isPendingStatus(it.status) }
         )
     }
 
@@ -272,7 +328,9 @@ object AdminConsoleHelpers {
             val matchesQuery = q.isEmpty() || listOfNotNull(
                 w.id,
                 w.payoutMethod,
-                w.accountDetails,
+                w.resolvedAccountSummary,
+                w.paystackTransferReference,
+                w.manualReference,
                 w.status,
                 requester?.resolvedName,
                 requester?.email
@@ -462,11 +520,14 @@ fun AdminDetailBottomSheet(
     onFilterCampus: (tab: String, campusName: String) -> Unit,
     onRequestConfirm: (title: String, message: String, action: () -> Unit) -> Unit,
     onToggleBan: (String, Boolean) -> Unit,
+    onToggleAdminRole: (String, Boolean) -> Unit = { _, _ -> },
     onUpdateProductStatus: (String, String) -> Unit,
     onDeleteProduct: (String) -> Unit = {},
     onResolveVerification: (String, Boolean, String?) -> Unit,
     onRequestRejectKyc: (String) -> Unit = {},
     onResolveWithdrawal: (String, Boolean) -> Unit,
+    onRequestManualApproveWithdrawal: (String) -> Unit = {},
+    onRetryWithdrawalPaystack: (String) -> Unit = {},
     onResolveRefund: (String, String, Boolean) -> Unit,
     onEditCampus: (CampusRow) -> Unit = {},
     onDeleteCampus: (CampusRow) -> Unit = {},
@@ -505,6 +566,16 @@ fun AdminDetailBottomSheet(
                         ) {
                             onDismiss()
                             onToggleBan(target.profile.id, ban)
+                        }
+                    },
+                    onToggleAdminRole = { makeAdmin ->
+                        onRequestConfirm(
+                            if (makeAdmin) "Grant Admin Role?" else "Revoke Admin Role?",
+                            if (makeAdmin) "Grant full administrator permissions to ${target.profile.resolvedName}?"
+                            else "Remove administrator permissions from ${target.profile.resolvedName}?"
+                        ) {
+                            onDismiss()
+                            onToggleAdminRole(target.profile.id, makeAdmin)
                         }
                     },
                     onCopied = onCopied
@@ -592,13 +663,27 @@ fun AdminDetailBottomSheet(
                     actionLoading = actionLoading,
                     onSelectUser = { profile -> onSelectTarget(AdminDetailTarget.User(profile)) },
                     onResolve = { approve ->
+                        val summary = target.request.resolvedAccountSummary ?: "the listed account"
                         onRequestConfirm(
                             if (approve) "Approve Withdrawal?" else "Reject Withdrawal?",
-                            if (approve) "Release ${KartFormatters.formatCedis(target.request.amount)} via ${target.request.payoutMethod ?: "MoMo"} to ${target.request.accountDetails ?: "the listed account"}?"
+                            if (approve) "Release ${KartFormatters.formatCedis(target.request.amount)} via ${target.request.payoutMethod ?: "MoMo"} to $summary?"
                             else "Reject this ${KartFormatters.formatCedis(target.request.amount)} withdrawal request?"
                         ) {
                             onDismiss()
                             onResolveWithdrawal(target.request.id, approve)
+                        }
+                    },
+                    onRequestManualApprove = {
+                        onDismiss()
+                        onRequestManualApproveWithdrawal(target.request.id)
+                    },
+                    onRetryPaystack = {
+                        onRequestConfirm(
+                            "Retry Paystack Transfer?",
+                            "Retry sending ${KartFormatters.formatCedis(target.request.amount)} via Paystack?"
+                        ) {
+                            onDismiss()
+                            onRetryWithdrawalPaystack(target.request.id)
                         }
                     },
                     onCopied = onCopied
@@ -745,6 +830,7 @@ private fun AdminUserDetailContent(
     actionLoading: Boolean,
     onOpenSeller: () -> Unit,
     onToggleBan: (Boolean) -> Unit,
+    onToggleAdminRole: (Boolean) -> Unit,
     onCopied: (String) -> Unit
 ) {
     val userListings = bundle.products.count { it.sellerId == user.id }
@@ -817,6 +903,17 @@ private fun AdminUserDetailContent(
             )
         }
     }
+    if (!isSelf) {
+        val nextAdmin = user.isAdmin != true
+        KartOutlineButton(
+            text = if (nextAdmin) "Grant Admin Role" else "Revoke Admin Role",
+            enabled = !actionLoading,
+            borderColor = if (nextAdmin) KartPrimary else KartDanger,
+            contentColor = if (nextAdmin) KartPrimary else KartDanger,
+            onClick = { onToggleAdminRole(nextAdmin) },
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
 }
 
 @Composable
@@ -855,7 +952,7 @@ private fun AdminListingDetailContent(
         LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             items(images) { url ->
                 AsyncImage(
-                    model = url,
+                    model = KartFormatters.buildOptimizedImageUrl(url, KartFormatters.ImageVariant.CARD),
                     contentDescription = product.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
@@ -932,7 +1029,7 @@ private fun AdminOrderDetailContent(
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         order.product?.primaryImage?.let { img ->
             AsyncImage(
-                model = img,
+                model = KartFormatters.buildOptimizedImageUrl(img, KartFormatters.ImageVariant.CARD),
                 contentDescription = order.product.title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.size(56.dp).clip(RoundedCornerShape(10.dp))
@@ -986,14 +1083,13 @@ private fun AdminOrderDetailContent(
 private fun buildAdminImageRequest(rawUrl: String, accessToken: String, isPrivateVerification: Boolean): Any {
     val context = LocalContext.current
     val trimmed = rawUrl.trim()
-    val resolvedUrl = if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
-        trimmed
-    } else if (isPrivateVerification) {
-        "${BuildConfig.SUPABASE_URL.trimEnd('/')}/storage/v1/object/authenticated/verifications/${trimmed.trimStart('/')}"
-    } else {
-        "${BuildConfig.SUPABASE_URL.trimEnd('/')}/storage/v1/object/public/${trimmed.trimStart('/')}"
+    val baseUrl = BuildConfig.SUPABASE_URL.trimEnd('/')
+    val resolvedUrl = when {
+        trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true) -> trimmed
+        isPrivateVerification -> "$baseUrl/storage/v1/object/authenticated/verifications/${trimmed.trimStart('/')}"
+        else -> "$baseUrl/storage/v1/object/public/${trimmed.trimStart('/')}"
     }
-    val needsAuth = isPrivateVerification || resolvedUrl.contains("/storage/v1/object/authenticated/", true)
+    val needsAuth = AdminConsoleHelpers.shouldAttachSupabaseAuthHeaders(resolvedUrl, baseUrl)
     return if (needsAuth && accessToken.isNotBlank()) {
         ImageRequest.Builder(context)
             .data(resolvedUrl)
@@ -1002,7 +1098,7 @@ private fun buildAdminImageRequest(rawUrl: String, accessToken: String, isPrivat
             .crossfade(true)
             .build()
     } else {
-        resolvedUrl
+        KartFormatters.buildOptimizedImageUrl(resolvedUrl, KartFormatters.ImageVariant.DETAIL)
     }
 }
 
@@ -1103,10 +1199,16 @@ private fun AdminWithdrawalDetailContent(
     actionLoading: Boolean,
     onSelectUser: (Profile) -> Unit,
     onResolve: (Boolean) -> Unit,
+    onRequestManualApprove: () -> Unit,
+    onRetryPaystack: () -> Unit,
     onCopied: (String) -> Unit
 ) {
     val requester = request.userId?.let { bundle.usersById[it] }
     val isPending = AdminConsoleHelpers.isPendingStatus(request.status)
+    val canRetryOrManual = isPending ||
+        request.status.equals("Failed", true) ||
+        request.status.equals("Processing", true)
+    val accountSummary = request.resolvedAccountSummary
 
     Text(KartFormatters.formatCedis(request.amount), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black, color = KartPrimary)
 
@@ -1114,7 +1216,31 @@ private fun AdminWithdrawalDetailContent(
         AdminDetailRow("Withdrawal ID", request.id, copyable = true, onCopied = onCopied)
         AdminDetailRow("Status", request.status ?: "Pending")
         AdminDetailRow("Method", request.payoutMethod ?: "MoMo")
-        AdminDetailRow("Account Details", request.accountDetails ?: "—", copyable = !request.accountDetails.isNullOrBlank(), onCopied = onCopied)
+        request.processingMethod?.takeIf { it.isNotBlank() }?.let {
+            AdminDetailRow("Processing", it.replaceFirstChar { ch -> ch.uppercase() })
+        }
+        AdminDetailRow("Account Details", accountSummary ?: "—", copyable = !accountSummary.isNullOrBlank(), onCopied = onCopied)
+        request.payoutDetails?.forEach { (k, rawV) ->
+            val v = rawV?.toString()?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+            if (v != null) {
+                val label = k.replace('_', ' ').replaceFirstChar { it.uppercase() }
+                AdminDetailRow(label, v, copyable = true, onCopied = onCopied)
+            }
+        }
+        request.paystackTransferReference?.takeIf { it.isNotBlank() }?.let {
+            AdminDetailRow("Paystack Ref", it, copyable = true, onCopied = onCopied)
+        }
+        request.manualReference?.takeIf { it.isNotBlank() }?.let {
+            AdminDetailRow("Manual Ref", it, copyable = true, onCopied = onCopied)
+        }
+        request.manualTransactionId?.takeIf { it.isNotBlank() }?.let {
+            AdminDetailRow("Manual Tx ID", it, copyable = true, onCopied = onCopied)
+        }
+        if ((request.paystackRetryCount ?: 0) > 0) {
+            AdminDetailRow("Paystack Retries", "${request.paystackRetryCount}")
+        }
+        request.adminNotes?.takeIf { it.isNotBlank() }?.let { AdminDetailRow("Admin Notes", it) }
+        request.manualNotes?.takeIf { it.isNotBlank() }?.let { AdminDetailRow("Manual Notes", it) }
         AdminDetailRow("Requested", KartFormatters.timeAgo(request.createdAt))
     }
 
@@ -1143,6 +1269,22 @@ private fun AdminWithdrawalDetailContent(
             )
         }
     }
+    if (canRetryOrManual) {
+        if (!isPending) {
+            KartPrimaryButton(
+                text = "Retry Paystack Transfer",
+                enabled = !actionLoading,
+                onClick = onRetryPaystack,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        KartOutlineButton(
+            text = "Manual Approve (Outside Paystack)",
+            enabled = !actionLoading,
+            onClick = onRequestManualApprove,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
 }
 
 @Composable
@@ -1167,6 +1309,8 @@ private fun AdminRefundDetailContent(
         AdminDetailRow("Refund ID", request.id, copyable = true, onCopied = onCopied)
         AdminDetailRow("Status", request.status ?: "Pending")
         AdminDetailRow("Reason", request.reason ?: "No reason provided")
+        request.description?.takeIf { it.isNotBlank() }?.let { AdminDetailRow("Description", it) }
+        request.adminNotes?.takeIf { it.isNotBlank() }?.let { AdminDetailRow("Admin Notes", it) }
         AdminDetailRow("Filed", KartFormatters.timeAgo(request.createdAt))
         request.orderId?.let { AdminDetailRow("Order ID", it, copyable = true, onCopied = onCopied) }
     }
@@ -1354,8 +1498,8 @@ private fun AdminAdDetailContent(
         AdminDetailRow("Ad ID", ad.id, copyable = true, onCopied = onCopied)
         AdminDetailRow("Ad Type", ad.adType ?: "Boost")
         AdminDetailRow("Status", ad.status ?: "Active")
-        AdminDetailRow("Price Paid", KartFormatters.formatCedis(ad.price))
-        AdminDetailRow("Duration", "${ad.durationDays ?: 0} days")
+        AdminDetailRow("Price Paid", KartFormatters.formatCedis(ad.resolvedPrice))
+        AdminDetailRow("Duration", "${ad.resolvedDurationDays} days")
         AdminDetailRow("Views / Clicks (CTR)", "$views / $clicks ($ctr)")
         ad.startDate?.let { AdminDetailRow("Start Date", KartFormatters.timeAgo(it)) }
         ad.endDate?.let { AdminDetailRow("End Date", KartFormatters.timeAgo(it)) }
@@ -1414,7 +1558,7 @@ private fun AdminCampusDetailContent(
         AdminDetailRow("Loaded Users", "${campusUsers.size}")
         AdminDetailRow("Verified Users", "$verifiedUsers")
         AdminDetailRow("Active Listings", "$activeListings")
-        AdminDetailRow("Total Listings", "${campusListings.size}")
+        AdminDetailRow("Loaded Listings", "${campusListings.size}")
     }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1499,7 +1643,8 @@ fun AdminFullScreenImageDialog(
     val imageModel = buildAdminImageRequest(
         rawUrl = imageUrl,
         accessToken = accessToken,
-        isPrivateVerification = imageUrl.contains("/verifications/", true)
+        isPrivateVerification = imageUrl.contains("/verifications/", true) ||
+            (!imageUrl.startsWith("http", true) && imageUrl.isNotBlank())
     )
     Dialog(
         onDismissRequest = onDismiss,

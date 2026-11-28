@@ -183,16 +183,35 @@ data class ActiveAdvertisementRow(
     @Json(name = "end_date") val endDate: String? = null,
     val views: Int? = 0,
     val clicks: Int? = 0,
+    val cost: Double? = null,
     val price: Double? = 0.0,
     @Json(name = "duration_days") val durationDays: Int? = null,
+    @Json(name = "seller_id") val sellerId: String? = null,
     @Json(name = "product_id") val productId: String? = null,
     val product: Product? = null
-)
+) {
+    val resolvedPrice: Double
+        get() = cost ?: price ?: 0.0
+
+    val resolvedDurationDays: Int
+        get() {
+            val explicit = durationDays ?: 0
+            if (explicit > 0) return explicit
+            val startMs = KartFormatters.parseIsoTimestamp(startDate)
+            val endMs = KartFormatters.parseIsoTimestamp(endDate)
+            if (startMs > 0L && endMs > startMs) {
+                return ((endMs - startMs) / 86_400_000L).toInt().coerceAtLeast(1)
+            }
+            return 0
+        }
+}
 
 @JsonClass(generateAdapter = true)
 data class MarketplaceProductsResponse(
     val products: List<Product> = emptyList(),
     val hasMore: Boolean = false,
+    val nextCursor: String? = null,
+    val source: String? = null,
     val error: String? = null
 )
 
@@ -273,6 +292,8 @@ data class Order(
     @Json(name = "platform_fee_total") val platformFeeTotal: Double? = 0.0,
     @Json(name = "seller_payout_amount") val sellerPayoutAmount: Double? = 0.0,
     val status: String? = "Pending",
+    @Json(name = "escrow_status") val escrowStatus: String? = null,
+    @Json(name = "refund_status") val refundStatus: String? = null,
     val currency: String? = "GHS",
     @Json(name = "payment_method") val paymentMethod: String? = null,
     @Json(name = "payment_reference") val paymentReference: String? = null,
@@ -295,7 +316,8 @@ data class Review(
     val rating: Int = 5,
     val comment: String? = null,
     @Json(name = "created_at") val createdAt: String? = null,
-    val reviewer: SellerSnippet? = null
+    val reviewer: SellerSnippet? = null,
+    val buyer: SellerSnippet? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -310,12 +332,19 @@ data class WalletTransaction(
     @Json(name = "wallet_id") val walletId: String? = null,
     val amount: Double = 0.0,
     val type: String? = null,
+    @Json(name = "transaction_type") val transactionType: String? = null,
+    @Json(name = "balance_before") val balanceBefore: Double? = null,
+    @Json(name = "balance_after") val balanceAfter: Double? = null,
     val status: String? = null,
+    val reference: String? = null,
     val description: String? = null,
     @Json(name = "order_id") val orderId: String? = null,
     @Json(name = "created_at") val createdAt: String? = null,
     val order: WalletTransactionOrder? = null
-)
+) {
+    val resolvedType: String?
+        get() = type?.takeIf { it.isNotBlank() } ?: transactionType?.takeIf { it.isNotBlank() }
+}
 
 @JsonClass(generateAdapter = true)
 data class Wallet(
@@ -343,6 +372,7 @@ data class NotificationItem(
     val title: String? = null,
     val message: String? = null,
     val link: String? = null,
+    @Json(name = "related_order_id") val relatedOrderId: String? = null,
     @Json(name = "is_read") val isRead: Boolean? = false,
     @Json(name = "created_at") val createdAt: String? = null
 )
@@ -393,6 +423,8 @@ data class UserSubscription(
     val status: String? = null,
     @Json(name = "start_date") val startDate: String? = null,
     @Json(name = "end_date") val endDate: String? = null,
+    @Json(name = "auto_renew") val autoRenew: Boolean? = null,
+    @Json(name = "payment_reference") val paymentReference: String? = null,
     @Json(name = "created_at") val createdAt: String? = null,
     val plan: SubscriptionPlan? = null
 )
@@ -401,15 +433,26 @@ data class UserSubscription(
 data class PlatformSetting(
     val key: String,
     val value: Any? = null,
-    val category: String? = null
+    val category: String? = null,
+    val label: String? = null,
+    val description: String? = null
 )
 
 data class PlatformFlags(
     val isMaintenanceMode: Boolean = false,
     val buyNowEnabled: Boolean = true,
-    val promoBoostRate: Double = 15.0,
-    val promoFeaturedRate: Double = 35.0,
-    val promoCampusAdRate: Double = 65.0
+    val promoDailyPrice: Double = 5.0,
+    val promoWeeklyPrice: Double = 25.0,
+    val promoFeaturedPrice: Double = 50.0,
+    val marketplaceServiceFee: Double = 2.0,
+    val transactionFeeFixed: Double = 1.0,
+    val transactionFeePercent: Double = 0.0,
+    val withdrawalFeeFlat: Double = 1.0,
+    val minDepositAmount: Double = 10.0,
+    val minWithdrawalAmount: Double = 10.0,
+    val maxListingPrice: Double = 50000.0,
+    val supportEmail: String = "support@kart.com",
+    val whatsappSupportNumber: String = ""
 )
 
 @JsonClass(generateAdapter = true)
@@ -493,11 +536,50 @@ data class WithdrawalRequestRow(
     val id: String,
     @Json(name = "user_id") val userId: String? = null,
     val amount: Double = 0.0,
+    val currency: String? = "GHS",
     val status: String? = null,
     @Json(name = "payout_method") val payoutMethod: String? = null,
     @Json(name = "account_details") val accountDetails: String? = null,
+    @Json(name = "payout_details") val payoutDetails: Map<String, Any?>? = null,
+    @Json(name = "processing_method") val processingMethod: String? = null,
+    @Json(name = "paystack_transfer_reference") val paystackTransferReference: String? = null,
+    @Json(name = "manual_reference") val manualReference: String? = null,
+    @Json(name = "manual_transaction_id") val manualTransactionId: String? = null,
+    @Json(name = "manual_notes") val manualNotes: String? = null,
+    @Json(name = "admin_notes") val adminNotes: String? = null,
+    @Json(name = "paystack_retry_count") val paystackRetryCount: Int? = 0,
     @Json(name = "created_at") val createdAt: String? = null
-)
+) {
+    val resolvedAccountSummary: String?
+        get() {
+            val map = payoutDetails
+            if (!map.isNullOrEmpty()) {
+                val orderedKeys = listOf(
+                    "network", "momo_network", "provider", "bank_name", "bank",
+                    "momo_number", "phone", "phone_number", "account_number",
+                    "account_name", "name"
+                )
+                val parts = mutableListOf<String>()
+                val consumed = mutableSetOf<String>()
+                for (k in orderedKeys) {
+                    val v = map[k]?.toString()?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+                    if (v != null) {
+                        parts.add(v)
+                        consumed.add(k)
+                    }
+                }
+                for ((k, rawV) in map) {
+                    if (k in consumed) continue
+                    val v = rawV?.toString()?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+                    if (v != null && k != "recipient_code" && k != "bank_code") {
+                        parts.add(v)
+                    }
+                }
+                if (parts.isNotEmpty()) return parts.distinct().joinToString(" • ")
+            }
+            return accountDetails?.takeIf { it.isNotBlank() }
+        }
+}
 
 @JsonClass(generateAdapter = true)
 data class AccountDeletionRequestRow(
@@ -516,7 +598,9 @@ data class RefundRequestRow(
     @Json(name = "order_id") val orderId: String? = null,
     @Json(name = "buyer_id") val buyerId: String? = null,
     val reason: String? = null,
+    val description: String? = null,
     val status: String? = null,
+    @Json(name = "admin_notes") val adminNotes: String? = null,
     @Json(name = "created_at") val createdAt: String? = null
 )
 
@@ -547,3 +631,50 @@ data class UserSession(
 ) {
     val isLoggedIn: Boolean get() = accessToken.isNotBlank() && userId.isNotBlank()
 }
+
+@JsonClass(generateAdapter = true)
+data class UnreadSummaryRpc(
+    @Json(name = "unread_notifications") val unreadNotifications: Int = 0,
+    @Json(name = "unread_messages") val unreadMessages: Int = 0
+)
+
+@JsonClass(generateAdapter = true)
+data class FollowStatsRpc(
+    @Json(name = "followers_count") val followersCount: Int = 0,
+    @Json(name = "following_count") val followingCount: Int = 0,
+    @Json(name = "is_following") val isFollowing: Boolean = false
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminOverviewStatsRpc(
+    @Json(name = "total_users") val totalUsers: Int = 0,
+    @Json(name = "banned_users") val bannedUsers: Int = 0,
+    @Json(name = "verified_users") val verifiedUsers: Int = 0,
+    @Json(name = "admin_users") val adminUsers: Int? = null,
+    @Json(name = "standard_users") val standardUsers: Int? = null,
+    @Json(name = "total_listings") val totalListings: Int? = null,
+    @Json(name = "active_listings") val activeListings: Int = 0,
+    @Json(name = "suspended_listings") val suspendedListings: Int = 0,
+    @Json(name = "sold_listings") val soldListings: Int? = null,
+    @Json(name = "total_orders") val totalOrders: Int = 0,
+    @Json(name = "total_gmv") val totalGmv: Double = 0.0,
+    @Json(name = "total_platform_fees") val totalPlatformFees: Double = 0.0,
+    @Json(name = "pending_kyc") val pendingKyc: Int = 0,
+    @Json(name = "pending_withdrawals") val pendingWithdrawals: Int = 0,
+    @Json(name = "pending_refunds") val pendingRefunds: Int = 0,
+    @Json(name = "pending_deletions") val pendingDeletions: Int? = null,
+    @Json(name = "open_reports") val openReports: Int = 0,
+    @Json(name = "open_product_reports") val openProductReports: Int = 0,
+    @Json(name = "open_user_reports") val openUserReports: Int = 0,
+    @Json(name = "total_reviews") val totalReviews: Int = 0,
+    @Json(name = "active_ads") val activeAds: Int = 0
+)
+
+@JsonClass(generateAdapter = true)
+data class InboxItemRpc(
+    val id: String,
+    @Json(name = "updated_at") val updatedAt: String? = null,
+    @Json(name = "unread_count") val unreadCount: Int = 0,
+    @Json(name = "other_user") val otherUser: Profile? = null,
+    @Json(name = "last_message") val lastMessage: MessageRow? = null
+)

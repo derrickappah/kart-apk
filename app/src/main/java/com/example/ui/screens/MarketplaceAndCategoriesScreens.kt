@@ -54,6 +54,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.paging.LoadState
+import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -66,6 +68,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.model.EmptyStateAsset
 import com.example.domain.model.KartCategories
+import com.example.domain.model.KartErrorFormatter
 import com.example.domain.model.Product
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.FilterBottomSheet
@@ -91,40 +94,25 @@ fun MarketplaceScreen(
     onWishlistToggle: (String) -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val pagingItems = viewModel.pagedProducts.collectAsLazyPagingItems()
     var showFilterSheet by remember { mutableStateOf(false) }
+    var userTriggeredRefresh by remember { mutableStateOf(false) }
 
     LaunchedEffect(initialCategory) {
         viewModel.ensureInitialLoad(initialCategory)
     }
 
+    LaunchedEffect(pagingItems.loadState.refresh) {
+        if (pagingItems.loadState.refresh !is LoadState.Loading) {
+            userTriggeredRefresh = false
+        }
+    }
+
     val gridColumns = if (contentMaxWidth >= 840.dp) 4 else if (contentMaxWidth >= 600.dp) 3 else 2
     val listState = rememberLazyListState()
-
-    val shouldLoadMore by remember(
-        listState,
-        state.hasMore,
-        state.loading,
-        state.loadingMore,
-        state.refreshing,
-        state.error
-    ) {
-        derivedStateOf {
-            if (!state.hasMore || state.loading || state.loadingMore || state.refreshing || state.error != null) {
-                false
-            } else {
-                val layoutInfo = listState.layoutInfo
-                val totalItems = layoutInfo.totalItemsCount
-                val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                totalItems > 0 && lastVisibleIndex >= totalItems - 2
-            }
-        }
-    }
-
-    LaunchedEffect(shouldLoadMore, state.products.size) {
-        if (shouldLoadMore) {
-            viewModel.loadProducts(reset = false)
-        }
-    }
+    val refreshState = pagingItems.loadState.refresh
+    val appendState = pagingItems.loadState.append
+    val isPullRefreshing = userTriggeredRefresh && refreshState is LoadState.Loading
 
     Box(
         modifier = Modifier
@@ -133,8 +121,11 @@ fun MarketplaceScreen(
     ) {
 
         PullToRefreshBox(
-            isRefreshing = state.refreshing,
-            onRefresh = { viewModel.loadProducts(reset = true, isRefresh = true) },
+            isRefreshing = isPullRefreshing,
+            onRefresh = {
+                userTriggeredRefresh = true
+                pagingItems.refresh()
+            },
             modifier = Modifier.fillMaxSize()
         ) {
             LazyColumn(
@@ -332,7 +323,7 @@ fun MarketplaceScreen(
 
                 // Content Grid / Skeleton / Empty
                 when {
-                    state.loading && state.products.isEmpty() -> {
+                    refreshState is LoadState.Loading && pagingItems.itemCount == 0 -> {
                         items(4) {
                             Row(
                                 horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -346,21 +337,25 @@ fun MarketplaceScreen(
                             }
                         }
                     }
-                    state.error != null && state.products.isEmpty() -> {
+                    refreshState is LoadState.Error && pagingItems.itemCount == 0 -> {
                         item(key = "mp_error") {
+                            val isOfflineErr = KartErrorFormatter.isConnectivityError(refreshState.error)
                             EmptyStateView(
-                                asset = EmptyStateAsset.ERROR,
+                                asset = if (isOfflineErr) EmptyStateAsset.OFFLINE else EmptyStateAsset.ERROR,
                                 title = "Couldn't load marketplace",
-                                subtitle = state.error ?: "Something went wrong.",
+                                subtitle = KartErrorFormatter.fromThrowable(
+                                    refreshState.error,
+                                    "Something went wrong. Please try again."
+                                ),
                                 actionLabel = "Try Again",
-                                onActionClick = { viewModel.loadProducts(reset = true) },
+                                onActionClick = { pagingItems.retry() },
                                 modifier = Modifier
                                     .fillParentMaxHeight(0.75f)
                                     .fillMaxWidth()
                             )
                         }
                     }
-                    state.products.isEmpty() -> {
+                    refreshState is LoadState.NotLoading && pagingItems.itemCount == 0 -> {
                         item(key = "mp_empty") {
                             EmptyStateView(
                                 asset = EmptyStateAsset.SEARCH,
@@ -375,31 +370,45 @@ fun MarketplaceScreen(
                         }
                     }
                     else -> {
-                        val rows = state.products.chunked(gridColumns)
-                        items(rows.size, key = { idx -> "mp_row_$idx" }) { rowIdx ->
-                            val rowItems = rows[rowIdx]
+                        val totalItems = pagingItems.itemCount
+                        val rowCount = (totalItems + gridColumns - 1) / gridColumns
+                        items(
+                            count = rowCount,
+                            key = { rowIdx ->
+                                val firstId = pagingItems.peek(rowIdx * gridColumns)?.id
+                                "mp_row_${rowIdx}_${firstId ?: "pending"}"
+                            }
+                        ) { rowIdx ->
+                            val startIdx = rowIdx * gridColumns
                             Row(
                                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 20.dp, vertical = 8.dp)
                             ) {
-                                rowItems.forEach { product ->
-                                    KartProductCard(
-                                        product = product,
-                                        isWishlisted = product.id in wishlistIds,
-                                        onProductClick = onProductClick,
-                                        onWishlistToggle = onWishlistToggle,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-                                repeat(gridColumns - rowItems.size) {
-                                    Spacer(Modifier.weight(1f))
+                                for (col in 0 until gridColumns) {
+                                    val itemIdx = startIdx + col
+                                    if (itemIdx < totalItems) {
+                                        val product = pagingItems[itemIdx]
+                                        if (product != null) {
+                                            KartProductCard(
+                                                product = product,
+                                                isWishlisted = product.id in wishlistIds,
+                                                onProductClick = onProductClick,
+                                                onWishlistToggle = onWishlistToggle,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        } else {
+                                            ProductCardSkeleton(modifier = Modifier.weight(1f))
+                                        }
+                                    } else {
+                                        Spacer(Modifier.weight(1f))
+                                    }
                                 }
                             }
                         }
 
-                        if (state.loadingMore) {
+                        if (appendState is LoadState.Loading) {
                             item(key = "loading_more_skeleton") {
                                 Row(
                                     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -412,7 +421,7 @@ fun MarketplaceScreen(
                                     }
                                 }
                             }
-                        } else if (state.error != null) {
+                        } else if (appendState is LoadState.Error) {
                             item(key = "load_more_error") {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -425,7 +434,10 @@ fun MarketplaceScreen(
                                         .padding(horizontal = 14.dp, vertical = 10.dp)
                                 ) {
                                     Text(
-                                        text = state.error ?: "Could not load more items.",
+                                        text = KartErrorFormatter.fromThrowable(
+                                            appendState.error,
+                                            "Could not load more items."
+                                        ),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onErrorContainer,
                                         modifier = Modifier.weight(1f)
@@ -438,9 +450,7 @@ fun MarketplaceScreen(
                                         color = KartPrimary,
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(8.dp))
-                                            .clickable {
-                                                viewModel.loadProducts(reset = !state.hasMore)
-                                            }
+                                            .clickable { pagingItems.retry() }
                                             .padding(horizontal = 8.dp, vertical = 4.dp)
                                     )
                                 }

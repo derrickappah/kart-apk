@@ -262,7 +262,10 @@ fun ProfileScreen(
                             val safeWhatsappUrl = KartFormatters.sanitizeSocialUrl(resolvedWhatsapp, "whatsapp")
                             val hasSocials = safeInstagramUrl != null || safeSnapchatUrl != null || safeWhatsappUrl != null
                             if (hasSocials) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
+                                ) {
                                     safeInstagramUrl?.let { url ->
                                         SocialIconButton(R.drawable.ic_social_instagram, "Instagram") {
                                             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }

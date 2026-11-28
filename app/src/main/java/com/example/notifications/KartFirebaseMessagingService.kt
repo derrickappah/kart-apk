@@ -7,8 +7,24 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+
+/**
+ * In-process bus notifying foreground ViewModels immediately when an FCM push arrives,
+ * eliminating aggressive 15-second unread polling loops.
+ */
+object KartPushEventBus {
+    private val _events = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val events: SharedFlow<String> = _events.asSharedFlow()
+
+    fun emit(type: String) {
+        _events.tryEmit(type)
+    }
+}
 
 /**
  * Handles incoming Firebase Cloud Messaging (FCM) push notifications when the app is
@@ -43,6 +59,7 @@ class KartFirebaseMessagingService : FirebaseMessagingService() {
 
         val type = data["type"]?.lowercase().orEmpty()
         val isMessage = type == "message" || type == "chat"
+        KartPushEventBus.emit(if (isMessage) "message" else "update")
         val channelId = if (isMessage) {
             KartNotificationHelper.CHANNEL_MESSAGES
         } else {

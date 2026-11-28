@@ -225,7 +225,7 @@ fun WalletScreen(
                     }
                 } else {
                     items(txns, key = { it.id }) { txn ->
-                        val typeLower = txn.type?.lowercase().orEmpty()
+                        val typeLower = txn.resolvedType?.lowercase().orEmpty()
                         val isDebitType = typeLower in setOf(
                             "debit", "withdrawal", "purchase", "payment",
                             "fee", "escrow_hold", "subscription", "promotion", "charge"
@@ -263,7 +263,7 @@ fun WalletScreen(
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    txn.description ?: txn.order?.product?.title ?: (txn.type ?: "Wallet Activity"),
+                                    txn.description ?: txn.order?.product?.title ?: (txn.resolvedType ?: "Wallet Activity"),
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1

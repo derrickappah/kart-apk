@@ -89,6 +89,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.R
 import com.example.domain.model.EmptyStateAsset
+import com.example.domain.model.KartErrorFormatter
 import com.example.domain.model.KartFormatters
 import com.example.domain.model.KartGhanaCampuses
 import com.example.ui.components.EmptyStateView
@@ -1057,7 +1058,12 @@ private fun GoogleContinueButton(
                 } catch (e: Exception) {
                     Log.e("KartGoogleAuth", "Unexpected error", e)
                     googleLoading = false
-                    onError(e.localizedMessage ?: "Could not start Google sign-in. Please try again.")
+                    onError(
+                        KartErrorFormatter.fromThrowable(
+                            e,
+                            "Could not start Google sign-in. Please try again."
+                        )
+                    )
                 }
             }
         },
